@@ -1,8 +1,29 @@
 import { Request, Response, Router } from 'express';
 import { supabaseAdmin } from '../services/supabaseAdmin';
-import { AuthenticatedRequest, requireAuth } from '../middlewares/auth';
-import { supabasePublic } from '../services/supabasePublic';
+import { requireAuth } from '../middlewares/auth';
 import { CreateQuestionInput } from '../types/question.types';
+
+const ALLOWED_UPDATE_FIELDS: Record<string, string> = {
+  question: 'question',
+  options: 'options',
+  answer: 'answer',
+  topic: 'topic',
+  domain: 'domain',
+  type: 'type',
+  language: 'language',
+  isPublished: 'is_published',
+  materialTitle: 'material_title',
+};
+
+function pickAllowedUpdates(body: Record<string, unknown>): Record<string, unknown> {
+  const updates: Record<string, unknown> = {};
+  for (const [key, column] of Object.entries(ALLOWED_UPDATE_FIELDS)) {
+    if (key in body) {
+      updates[column] = body[key];
+    }
+  }
+  return updates;
+}
 
 const router = Router();
 
@@ -41,7 +62,11 @@ router
 .patch('/:id', requireAuth, async (req: Request, res: Response) => {
     const { id } = req.params;
 
-    const updates = req.body;
+    const updates = pickAllowedUpdates(req.body);
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
 
     const { data, error } = await supabaseAdmin
       .from('questions')
@@ -70,6 +95,19 @@ router
     }
 
     res.json(data);
+})
+.get('/materials', requireAuth, async (req: Request, res: Response) => {
+    const { data, error } = await supabaseAdmin
+      .from('materials')
+      .select('id, title, source_file, question_count, created_at')
+      .eq('user_id', req.user!.id)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.json(data ?? []);
 })
 .get('/material/:title', requireAuth, async (req: Request, res: Response) => {
     const { title } = req.params;

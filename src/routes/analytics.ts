@@ -152,6 +152,78 @@ router
 
   res.json(data);
 })
+.get('/leaderboard', requireAuth, async (req, res) => {
+  const { data: attempts, error } = await supabaseAdmin
+    .from('attempts')
+    .select('user_id, score, accuracy')
+    .not('completed_at', 'is', null);
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  const stats = new Map<
+    string,
+    { bestScore: number; totalScore: number; attempts: number; totalAccuracy: number }
+  >();
+
+  for (const attempt of attempts ?? []) {
+    const current = stats.get(attempt.user_id) ?? {
+      bestScore: 0,
+      totalScore: 0,
+      attempts: 0,
+      totalAccuracy: 0,
+    };
+
+    current.bestScore = Math.max(current.bestScore, attempt.score ?? 0);
+    current.totalScore += attempt.score ?? 0;
+    current.attempts += 1;
+    current.totalAccuracy += attempt.accuracy ?? 0;
+
+    stats.set(attempt.user_id, current);
+  }
+
+  const userIds = [...stats.keys()];
+  if (userIds.length === 0) {
+    return res.json([]);
+  }
+
+  const { data: profiles } = await supabaseAdmin
+    .from('profiles')
+    .select('id, first_name, last_name')
+    .in('id', userIds);
+
+  const profileMap = new Map((profiles ?? []).map((p) => [p.id, p]));
+
+  const leaderboard = userIds
+    .map((userId) => {
+      const userStats = stats.get(userId)!;
+      const profile = profileMap.get(userId);
+      const name =
+        [profile?.first_name, profile?.last_name].filter(Boolean).join(' ') ||
+        'Anonymous';
+
+      return {
+        userId,
+        name,
+        bestScore: userStats.bestScore,
+        totalScore: userStats.totalScore,
+        attempts: userStats.attempts,
+        averageAccuracy: Number(
+          (userStats.totalAccuracy / userStats.attempts).toFixed(2)
+        ),
+        isCurrentUser: userId === req.user!.id,
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.bestScore - a.bestScore || b.averageAccuracy - a.averageAccuracy
+    )
+    .slice(0, 20)
+    .map((entry, index) => ({ rank: index + 1, ...entry }));
+
+  res.json(leaderboard);
+})
 .get('/retakes', requireAuth, async (req, res) => {
   const { materialTitle, type } = req.query;
 
@@ -171,8 +243,6 @@ router
   }
 
   const { data } = await q;
-  console.log("attempts", data, materialTitle, type, q.eq("question_type", type));
-  
 
   if (!data || data.length < 2) {
     return res.json({

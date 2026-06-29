@@ -132,7 +132,7 @@ Return:
     ]
   });
 
-  const raw = JSON.parse(response.choices[0].message.content ?? "{}");
+  const raw = parseJsonResponse(response.choices[0].message.content);
 
   return Array.isArray(raw.questions)
     ? raw.questions.map(normalizeQuestion)
@@ -190,7 +190,7 @@ Return:
     ]
   });
 
-  const raw = JSON.parse(response.choices[0].message.content ?? "{}");
+  const raw = parseJsonResponse(response.choices[0].message.content);
 
   return Array.isArray(raw.questions)
     ? raw.questions.map(normalizeQuestion)
@@ -243,4 +243,12 @@ function splitIntoChunks(text: string, size: number): string[] {
   }
 
   return chunks;
+}
+
+function parseJsonResponse(content: string | null | undefined): { questions?: unknown[] } {
+  try {
+    return JSON.parse(content ?? "{}");
+  } catch {
+    return {};
+  }
 }
