@@ -7,6 +7,7 @@ import {
 } from "./subscriptionService";
 import { listUserDevices } from "./deviceSessionService";
 import { isProTier } from "./subscriptionPlans";
+import { reactivateAccount, deactivateAccount } from "./accountService";
 
 type ProfileRow = {
   id: string;
@@ -16,6 +17,7 @@ type ProfileRow = {
   field_of_study?: string | null;
   occupation?: string | null;
   created_at?: string | null;
+  deactivated_at?: string | null;
 };
 
 async function getAuthUser(userId: string) {
@@ -46,6 +48,8 @@ async function enrichUserSummary(profile: ProfileRow, authUser?: User | null) {
     fieldOfStudy: profile.field_of_study ?? null,
     occupation: profile.occupation ?? null,
     createdAt: user.created_at ?? profile.created_at ?? null,
+    deactivatedAt: profile.deactivated_at ?? null,
+    isActive: !profile.deactivated_at,
     tier: subscription.tier,
     isPro: subscription.isPro,
     billingStatus: subscription.billingStatus,
@@ -144,7 +148,7 @@ export async function searchUsers(query: string, page = 1, limit = 20) {
     const { data: profile } = await supabaseAdmin
       .from("profiles")
       .select(
-        "id, first_name, last_name, phone_number, field_of_study, occupation, created_at"
+        "id, first_name, last_name, phone_number, field_of_study, occupation, created_at, deactivated_at"
       )
       .eq("id", authUser.id)
       .maybeSingle();
@@ -160,7 +164,7 @@ export async function searchUsers(query: string, page = 1, limit = 20) {
   let profileQuery = supabaseAdmin
     .from("profiles")
     .select(
-      "id, first_name, last_name, phone_number, field_of_study, occupation, created_at",
+      "id, first_name, last_name, phone_number, field_of_study, occupation, created_at, deactivated_at",
       { count: "exact" }
     )
     .order("created_at", { ascending: false })
@@ -195,7 +199,7 @@ export async function getUserDetail(userId: string) {
     supabaseAdmin
       .from("profiles")
       .select(
-        "id, first_name, last_name, phone_number, field_of_study, occupation, created_at"
+        "id, first_name, last_name, phone_number, field_of_study, occupation, created_at, deactivated_at"
       )
       .eq("id", userId)
       .maybeSingle(),
@@ -211,10 +215,24 @@ export async function getUserDetail(userId: string) {
     fieldOfStudy: profileResult.data?.field_of_study ?? null,
     occupation: profileResult.data?.occupation ?? null,
     createdAt: authUser.created_at ?? profileResult.data?.created_at ?? null,
+    deactivatedAt: profileResult.data?.deactivated_at ?? null,
+    isActive: !profileResult.data?.deactivated_at,
     lastSignInAt: authUser.last_sign_in_at ?? null,
     subscription,
     devices,
   };
+}
+
+export async function reactivateUserAccount(userId: string) {
+  await getAuthUser(userId);
+  await reactivateAccount(userId);
+  return getUserDetail(userId);
+}
+
+export async function deactivateUserAccount(userId: string) {
+  await getAuthUser(userId);
+  await deactivateAccount(userId);
+  return getUserDetail(userId);
 }
 
 export async function overrideUserSubscription(

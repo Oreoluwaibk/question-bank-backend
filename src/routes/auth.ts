@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { supabaseAdmin } from '../services/supabaseAdmin';
 import { uploadAvatarBuffer } from '../services/avatarStorage';
-import { requireAuth } from '../middlewares/auth';
+import { requireAuth, requireAuthOnly } from '../middlewares/auth';
 import { supabasePublic } from '../services/supabasePublic';
 import { provisionFreeSubscription } from '../services/subscriptionService';
 import {
@@ -12,9 +12,47 @@ import {
   removeDeviceSession,
 } from '../services/deviceSessionService';
 import { deviceErrorResponse } from '../lib/deviceErrors';
+import { accountErrorResponse } from '../lib/accountErrors';
+import {
+  assertAccountActive,
+  deactivateAccount,
+  getDeactivatedAt,
+  ACCOUNT_DEACTIVATED_MESSAGE,
+} from '../services/accountService';
 import { validateRegistrationInput } from '../lib/authValidation';
 
 const router = Router();
+
+async function findDeactivatedAtByEmail(email: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  let page = 1;
+  const perPage = 200;
+
+  while (true) {
+    const { data, error } = await supabaseAdmin.auth.admin.listUsers({
+      page,
+      perPage,
+    });
+
+    if (error) {
+      return null;
+    }
+
+    const match = data.users.find(
+      (user) => user.email?.toLowerCase() === normalizedEmail
+    );
+
+    if (match) {
+      return getDeactivatedAt(match.id);
+    }
+
+    if (data.users.length < perPage) {
+      return null;
+    }
+
+    page += 1;
+  }
+}
 
 async function recordTermsAcceptance(userId: string) {
   const acceptedAt = new Date().toISOString();
@@ -153,6 +191,14 @@ router.post('/signup', async (req, res) => {
     return res.status(500).json({ error: 'User not found after verification' });
   }
 
+  try {
+    await assertAccountActive(userId);
+  } catch (err) {
+    const accountErr = accountErrorResponse(res, err);
+    if (accountErr) return accountErr;
+    throw err;
+  }
+
   await provisionFreeSubscription(userId);
 
   try {
@@ -208,10 +254,25 @@ router.post('/signup', async (req, res) => {
   });
 
   if (error) {
+    const deactivatedAt = await findDeactivatedAtByEmail(email);
+    if (deactivatedAt) {
+      return res.status(403).json({
+        error: ACCOUNT_DEACTIVATED_MESSAGE,
+        code: 'ACCOUNT_DEACTIVATED',
+      });
+    }
     return res.status(401).json({ error: error.message });
   }
 
   if (data.user?.id) {
+    try {
+      await assertAccountActive(data.user.id);
+    } catch (err) {
+      const accountErr = accountErrorResponse(res, err);
+      if (accountErr) return accountErr;
+      throw err;
+    }
+
     try {
       await provisionFreeSubscription(data.user.id);
     } catch (provisionError) {
@@ -251,6 +312,25 @@ router.post('/signup', async (req, res) => {
   } catch (err) {
     res.status(400).json({
       error: err instanceof Error ? err.message : 'Could not log out device',
+    });
+  }
+})
+.post('/deactivate', requireAuthOnly, async (req: Request, res: Response) => {
+  const userId = req.user?.id;
+
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const { deactivatedAt } = await deactivateAccount(userId);
+    res.json({
+      message: 'Account deactivated',
+      deactivatedAt,
+    });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Could not deactivate account',
     });
   }
 })
@@ -320,6 +400,16 @@ router.post('/signup', async (req, res) => {
 
   if (verifyError || !data.session) {
     return res.status(400).json({ error: 'Invalid or expired OTP' });
+  }
+
+  if (data.user?.id) {
+    try {
+      await assertAccountActive(data.user.id);
+    } catch (err) {
+      const accountErr = accountErrorResponse(res, err);
+      if (accountErr) return accountErr;
+      throw err;
+    }
   }
 
   await supabasePublic.auth.setSession({

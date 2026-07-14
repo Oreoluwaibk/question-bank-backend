@@ -2,12 +2,14 @@ import { Router, Request, Response } from "express";
 import { requireAdmin } from "../middlewares/adminAuth";
 import {
   clearUserDevices,
+  deactivateUserAccount,
   getAdminLeaderboard,
   getMaterialDetail,
   getPlatformStats,
   getUserDetail,
   listMaterials,
   overrideUserSubscription,
+  reactivateUserAccount,
   removeUserDevice,
   searchUsers,
 } from "../services/adminService";
@@ -95,6 +97,32 @@ router.get("/users/:id", async (req: Request, res: Response) => {
     console.error("Admin user detail error:", error);
     res.status(404).json({
       error: error instanceof Error ? error.message : "User not found",
+    });
+  }
+});
+
+router.patch("/users/:id/reactivate", async (req: Request, res: Response) => {
+  try {
+    const user = await reactivateUserAccount(req.params.id);
+    res.json({ message: "Account reactivated", user });
+  } catch (error) {
+    console.error("Admin reactivate user error:", error);
+    res.status(500).json({
+      error:
+        error instanceof Error ? error.message : "Failed to reactivate user",
+    });
+  }
+});
+
+router.patch("/users/:id/deactivate", async (req: Request, res: Response) => {
+  try {
+    const user = await deactivateUserAccount(req.params.id);
+    res.json({ message: "Account deactivated", user });
+  } catch (error) {
+    console.error("Admin deactivate user error:", error);
+    res.status(500).json({
+      error:
+        error instanceof Error ? error.message : "Failed to deactivate user",
     });
   }
 });
