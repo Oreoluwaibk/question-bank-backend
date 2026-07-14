@@ -14,9 +14,50 @@ import {
   searchUsers,
 } from "../services/adminService";
 
+import {
+  listLegalDocuments,
+  parseLegalSlug,
+  updateLegalDocument,
+  type LegalDocumentContent,
+} from "../services/legalService";
+
 const router = Router();
 
 router.use(requireAdmin);
+
+router.get("/legal", async (_req: Request, res: Response) => {
+  try {
+    const documents = await listLegalDocuments();
+    res.json({ documents });
+  } catch (error) {
+    console.error("Admin legal list error:", error);
+    res.status(500).json({
+      error:
+        error instanceof Error ? error.message : "Failed to load legal documents",
+    });
+  }
+});
+
+router.put("/legal/:slug", async (req: Request, res: Response) => {
+  const slug = parseLegalSlug(req.params.slug);
+
+  if (!slug) {
+    return res.status(400).json({ error: 'slug must be "terms" or "privacy"' });
+  }
+
+  const content = req.body as LegalDocumentContent;
+
+  try {
+    const document = await updateLegalDocument(slug, content);
+    res.json({ message: "Legal document updated", document });
+  } catch (error) {
+    console.error("Admin legal update error:", error);
+    res.status(400).json({
+      error:
+        error instanceof Error ? error.message : "Failed to update legal document",
+    });
+  }
+});
 
 router.get("/stats", async (_req: Request, res: Response) => {
   try {

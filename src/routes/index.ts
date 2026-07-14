@@ -6,10 +6,12 @@ import attemptRouter from "./attempts";
 import analyticsRouter from "./analytics";
 import subscriptionRouter from "./subscription";
 import adminRouter from "./admin";
+import legalRouter from "./legal";
 
 const router = Router();
 
 router.use("/auth", authRouter);
+router.use("/legal", legalRouter);
 router.use("/admin", adminRouter);
 router.use("/upload", uploadRouter);
 router.use("/attempts", attemptRouter);

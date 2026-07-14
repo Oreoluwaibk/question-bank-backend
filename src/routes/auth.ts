@@ -20,6 +20,7 @@ import {
   ACCOUNT_DEACTIVATED_MESSAGE,
 } from '../services/accountService';
 import { validateRegistrationInput } from '../lib/authValidation';
+import { getPublishedTermsVersion } from '../services/legalService';
 
 const router = Router();
 
@@ -56,16 +57,20 @@ async function findDeactivatedAtByEmail(email: string) {
 
 async function recordTermsAcceptance(userId: string) {
   const acceptedAt = new Date().toISOString();
+  const termsVersion = await getPublishedTermsVersion();
   const { error } = await supabaseAdmin
     .from('profiles')
-    .update({ terms_accepted_at: acceptedAt })
+    .update({
+      terms_accepted_at: acceptedAt,
+      terms_accepted_version: termsVersion,
+    })
     .eq('id', userId);
 
   if (error) {
     throw error;
   }
 
-  return acceptedAt;
+  return { acceptedAt, termsVersion };
 }
 
 const uploadsDir = path.join(process.cwd(), 'uploads');
@@ -151,6 +156,7 @@ router.post('/signup', async (req, res) => {
 
   if (data.user?.id) {
     const acceptedAt = new Date().toISOString();
+    const termsVersion = await getPublishedTermsVersion();
     const { error: profileError } = await supabaseAdmin.from('profiles').upsert(
       {
         id: data.user.id,
@@ -158,6 +164,7 @@ router.post('/signup', async (req, res) => {
         last_name: lastName.trim(),
         phone_number: phoneNumber.trim(),
         terms_accepted_at: acceptedAt,
+        terms_accepted_version: termsVersion,
       },
       { onConflict: 'id' }
     );
@@ -353,16 +360,27 @@ router.post('/signup', async (req, res) => {
       refreshToken,
     });
 
-    const { data: profile } = await supabaseAdmin
-      .from('profiles')
-      .select('terms_accepted_at')
-      .eq('id', userId)
-      .maybeSingle();
+    const [{ data: profile }, currentTermsVersion] = await Promise.all([
+      supabaseAdmin
+        .from('profiles')
+        .select('terms_accepted_at, terms_accepted_version')
+        .eq('id', userId)
+        .maybeSingle(),
+      getPublishedTermsVersion(),
+    ]);
+
+    const termsAccepted = Boolean(profile?.terms_accepted_at);
+    const termsAcceptedVersion = profile?.terms_accepted_version ?? null;
+    const needsTermsAcceptance =
+      !termsAccepted || termsAcceptedVersion !== currentTermsVersion;
 
     res.json({
       message: 'Session registered',
-      termsAccepted: Boolean(profile?.terms_accepted_at),
+      termsAccepted,
       termsAcceptedAt: profile?.terms_accepted_at ?? null,
+      termsAcceptedVersion,
+      currentTermsVersion,
+      needsTermsAcceptance,
     });
   } catch (err) {
     const deviceErr = deviceErrorResponse(res, err);
@@ -455,10 +473,11 @@ router.post('/signup', async (req, res) => {
   }
 
   try {
-    const termsAcceptedAt = await recordTermsAcceptance(userId);
+    const { acceptedAt, termsVersion } = await recordTermsAcceptance(userId);
     res.json({
       message: 'Terms accepted',
-      terms_accepted_at: termsAcceptedAt,
+      terms_accepted_at: acceptedAt,
+      terms_accepted_version: termsVersion,
     });
   } catch (err: any) {
     return res.status(400).json({
@@ -468,7 +487,11 @@ router.post('/signup', async (req, res) => {
 })
 .put('/me', requireAuth, async (req, res) => {
   const userId = req.user?.id;
-  const { terms_accepted_at: _ignored, ...updates } = req.body;
+  const {
+    terms_accepted_at: _ignoredTermsAt,
+    terms_accepted_version: _ignoredTermsVersion,
+    ...updates
+  } = req.body;
 
   const { error } = await supabaseAdmin
     .from('profiles')
