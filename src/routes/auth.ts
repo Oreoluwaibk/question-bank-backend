@@ -3,8 +3,16 @@ import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
 import { supabaseAdmin } from '../services/supabaseAdmin';
+import { uploadAvatarBuffer } from '../services/avatarStorage';
 import { requireAuth } from '../middlewares/auth';
 import { supabasePublic } from '../services/supabasePublic';
+import { provisionFreeSubscription } from '../services/subscriptionService';
+import {
+  registerDeviceSession,
+  removeDeviceSession,
+} from '../services/deviceSessionService';
+import { deviceErrorResponse } from '../lib/deviceErrors';
+import { validateRegistrationInput } from '../lib/authValidation';
 
 const router = Router();
 
@@ -57,10 +65,22 @@ router.post('/signup', async (req, res) => {
   });
 })
 .post('/register', async (req: Request, res: Response) => {
-  const { email, password } = req.body;
+  const { email, password, firstName, lastName, phoneNumber } = req.body;
+
+  const validationError = validateRegistrationInput({
+    email,
+    password,
+    firstName,
+    lastName,
+    phoneNumber,
+  });
+
+  if (validationError) {
+    return res.status(400).json({ error: validationError });
+  }
 
   const { data, error } = await supabasePublic.auth.signUp({
-    email,
+    email: email.trim(),
     password,
     options: {
       emailRedirectTo: undefined // OTP only
@@ -71,13 +91,29 @@ router.post('/signup', async (req, res) => {
     return res.status(400).json({ error: error.message });
   }
 
+  if (data.user?.id) {
+    const { error: profileError } = await supabaseAdmin.from('profiles').upsert(
+      {
+        id: data.user.id,
+        first_name: firstName.trim(),
+        last_name: lastName.trim(),
+        phone_number: phoneNumber.trim(),
+      },
+      { onConflict: 'id' }
+    );
+
+    if (profileError) {
+      console.error('Failed to save profile on register:', profileError);
+    }
+  }
+
   res.json({
     message: 'OTP sent to email',
     userId: data.user?.id
   });
 })
 .post('/verify-otp', async (req: Request, res: Response) => {
-  const { email, otp } = req.body;
+  const { email, otp, deviceId, deviceName } = req.body;
 
   const { data, error } = await supabasePublic.auth.verifyOtp({
     email,
@@ -95,20 +131,20 @@ router.post('/signup', async (req, res) => {
     return res.status(500).json({ error: 'User not found after verification' });
   }
 
-  // 🔐 Auto-provision FREE subscription (idempotent)
-  await supabaseAdmin
-    .from('subscriptions')
-    .upsert(
-      {
-        user_id: userId,
-        tier: 'FREE',
-        material_limit: 2,
-        attempt_limit: 1,
-        allow_reattempt: false,
-        allow_timed: false
-      },
-      { onConflict: 'user_id' }
-    );
+  await provisionFreeSubscription(userId);
+
+  try {
+    await registerDeviceSession(userId, deviceId, {
+      deviceName,
+      refreshToken: data.session?.refresh_token,
+    });
+  } catch (err) {
+    const deviceErr = deviceErrorResponse(res, err);
+    if (deviceErr) return deviceErr;
+    return res.status(400).json({
+      error: err instanceof Error ? err.message : 'Could not register device',
+    });
+  }
 
   res.json({
     accessToken: data.session?.access_token,
@@ -142,7 +178,7 @@ router.post('/signup', async (req, res) => {
   }
 )
 .post('/login', async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, deviceId, deviceName } = req.body;
 
   const { data, error } = await supabasePublic.auth.signInWithPassword({
     email,
@@ -153,10 +189,75 @@ router.post('/signup', async (req, res) => {
     return res.status(401).json({ error: error.message });
   }
 
+  if (data.user?.id) {
+    try {
+      await provisionFreeSubscription(data.user.id);
+    } catch (provisionError) {
+      console.error('Failed to provision subscription on login:', provisionError);
+    }
+
+    try {
+      await registerDeviceSession(data.user.id, deviceId, {
+        deviceName,
+        refreshToken: data.session?.refresh_token,
+      });
+    } catch (err) {
+      const deviceErr = deviceErrorResponse(res, err);
+      if (deviceErr) return deviceErr;
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Could not register device',
+      });
+    }
+  }
+
   return res.json({
     user: data.user,
     session: data.session
   });
+})
+.post('/logout', requireAuth, async (req: Request, res: Response) => {
+  const userId = req.user?.id;
+  const { deviceId } = req.body as { deviceId?: string };
+
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    await removeDeviceSession(userId, deviceId ?? '');
+    res.json({ message: 'Logged out' });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Could not log out device',
+    });
+  }
+})
+.post('/session/register', requireAuth, async (req: Request, res: Response) => {
+  const userId = req.user?.id;
+  const { deviceId, deviceName, refreshToken } = req.body as {
+    deviceId?: string;
+    deviceName?: string;
+    refreshToken?: string;
+  };
+
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    await provisionFreeSubscription(userId);
+    await registerDeviceSession(userId, deviceId ?? '', {
+      deviceName,
+      refreshToken,
+    });
+    res.json({ message: 'Session registered' });
+  } catch (err) {
+    const deviceErr = deviceErrorResponse(res, err);
+    if (deviceErr) return deviceErr;
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Could not register session',
+    });
+  }
 })
 .post('/forgot-password', async (req: Request, res: Response) => {
   const { email } = req.body as { email: string };
@@ -253,36 +354,24 @@ async function saveAvatarFromBuffer(
     return res.status(400).json({ error: 'Uploaded image is empty' });
   }
 
-  const ext = mime.includes('png') ? 'png' : 'jpg';
-  const storagePath = `${userId}/avatar.${ext}`;
+  try {
+    const avatarUrl = await uploadAvatarBuffer(userId, buffer, mime);
 
-  const { error: uploadError } = await supabaseAdmin.storage
-    .from('avatars')
-    .upload(storagePath, buffer, {
-      upsert: true,
-      contentType: mime,
+    const { error: profileError } = await supabaseAdmin
+      .from('profiles')
+      .update({ avatar_url: avatarUrl })
+      .eq('id', userId);
+
+    if (profileError) {
+      return res.status(400).json({ error: profileError.message });
+    }
+
+    res.json({ avatar_url: avatarUrl });
+  } catch (err: any) {
+    return res.status(400).json({
+      error: err.message ?? 'Could not save profile picture',
     });
-
-  if (uploadError) {
-    return res.status(400).json({ error: uploadError.message });
   }
-
-  const { data: urlData } = supabaseAdmin.storage
-    .from('avatars')
-    .getPublicUrl(storagePath);
-
-  const avatarUrl = `${urlData.publicUrl}?t=${Date.now()}`;
-
-  const { error: profileError } = await supabaseAdmin
-    .from('profiles')
-    .update({ avatar_url: avatarUrl })
-    .eq('id', userId);
-
-  if (profileError) {
-    return res.status(400).json({ error: profileError.message });
-  }
-
-  res.json({ avatar_url: avatarUrl });
 }
 
 router

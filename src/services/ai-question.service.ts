@@ -1,4 +1,8 @@
-import { openai } from "../lib/openai";
+import { cursorPrompt } from "../lib/cursor";
+import {
+  sanitizeQuestionForDb,
+  type SanitizedQuestion,
+} from "../lib/questionSanitizer";
 import {
   Question,
   QuestionType,
@@ -32,6 +36,7 @@ const ALLOWED_DOMAINS: QuestionDomain[] = [
 
 const HARD_CAP = 200;
 const CHUNK_SIZE = 4_000;
+const QUESTIONS_PER_CALL = 10;
 
 /**
  * MAIN ENTRY
@@ -59,7 +64,7 @@ export async function extractQuestions(
     const extracted = await extractFromChunk(
       chunk,
       allowedTypes,
-      remaining
+      Math.min(remaining, QUESTIONS_PER_CALL)
     );
 
     questions.push(...extracted);
@@ -94,13 +99,7 @@ async function extractFromChunk(
   allowedTypes: QuestionType[],
   maxQuestions: number
 ): Promise<Question[]> {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `
+  const content = await cursorPrompt(`
 Extract questions from the text.
 
 Allowed types:
@@ -111,7 +110,12 @@ Rules:
 - Do NOT invent new content
 - Do NOT repeat questions
 - Assign ONE domain
-- Output JSON only
+- Do NOT use tools
+- Output JSON only, no markdown fences
+- MATCHING answers MUST be: [{ "left": "term", "right": "match" }, ...]
+- FILL_IN_THE_BLANK answers MUST be: ["blank1", "blank2", ...]
+- MCQ answer MUST be one of the options strings
+- TRUE_FALSE answer MUST be boolean true or false
 
 Return:
 {
@@ -126,16 +130,17 @@ Return:
     }
   ]
 }
-`
-      },
-      { role: "user", content: text }
-    ]
-  });
 
-  const raw = parseJsonResponse(response.choices[0].message.content);
+TEXT:
+${text}
+`);
+
+  const raw = parseJsonResponse(content);
 
   return Array.isArray(raw.questions)
-    ? raw.questions.map(normalizeQuestion)
+    ? raw.questions
+        .map(normalizeQuestion)
+        .filter((question): question is Question => question !== null)
     : [];
 }
 
@@ -149,13 +154,7 @@ async function generateAdditionalQuestions(
   count: number,
   existing: Question[]
 ): Promise<Question[]> {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `
+  const content = await cursorPrompt(`
 Generate NEW exam questions based on the material.
 
 Allowed types:
@@ -166,7 +165,12 @@ Rules:
 - Do NOT repeat or rephrase existing questions
 - Base questions on the concepts in the material
 - Assign ONE domain
-- Output JSON only
+- Do NOT use tools
+- Output JSON only, no markdown fences
+- MATCHING answers MUST be: [{ "left": "term", "right": "match" }, ...]
+- FILL_IN_THE_BLANK answers MUST be: ["blank1", "blank2", ...]
+- MCQ answer MUST be one of the options strings
+- TRUE_FALSE answer MUST be boolean true or false
 
 Existing questions (DO NOT DUPLICATE):
 ${existing.map(q => `- ${q.question}`).join("\n")}
@@ -184,16 +188,17 @@ Return:
     }
   ]
 }
-`
-      },
-      { role: "user", content: sourceText.slice(0, 6_000) }
-    ]
-  });
 
-  const raw = parseJsonResponse(response.choices[0].message.content);
+MATERIAL:
+${sourceText.slice(0, 6_000)}
+`);
+
+  const raw = parseJsonResponse(content);
 
   return Array.isArray(raw.questions)
-    ? raw.questions.map(normalizeQuestion)
+    ? raw.questions
+        .map(normalizeQuestion)
+        .filter((question): question is Question => question !== null)
     : [];
 }
 
@@ -201,31 +206,21 @@ Return:
 /* -------- NORMALIZATION ------------ */
 /* ---------------------------------- */
 
-function normalizeQuestion(q: any): Question {
-  const domain: QuestionDomain = ALLOWED_DOMAINS.includes(q.domain)
-    ? q.domain
-    : "GENERAL";
+function normalizeQuestion(q: any): Question | null {
+  const sanitized = sanitizeQuestionForDb(q);
+  if (!sanitized) return null;
+  return toQuestion(sanitized);
+}
 
-  let options: string[] | null = q.options ?? null;
-  let answer = q.answer ?? null;
-
-  if (q.type === "TRUE_FALSE") {
-    options = ["True", "False"];
-    if (typeof answer !== "boolean") answer = null;
-  }
-
-  if (q.type === "MCQ" && (!Array.isArray(options) || options.length < 3)) {
-    options = null;
-  }
-
+function toQuestion(sanitized: SanitizedQuestion): Question {
   return {
-    number: 0, // reassigned later
-    type: q.type,
-    question: String(q.question).trim(),
-    options,
-    answer,
-    topic: q.topic ?? null,
-    domain
+    number: 0,
+    type: sanitized.type,
+    question: sanitized.question,
+    options: sanitized.options,
+    answer: sanitized.answer as Question["answer"],
+    topic: sanitized.topic,
+    domain: sanitized.domain,
   };
 }
 
@@ -246,9 +241,24 @@ function splitIntoChunks(text: string, size: number): string[] {
 }
 
 function parseJsonResponse(content: string | null | undefined): { questions?: unknown[] } {
+  const trimmed = (content ?? "").trim();
+  if (!trimmed) return {};
+
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1].trim() : trimmed;
+
   try {
-    return JSON.parse(content ?? "{}");
+    return JSON.parse(candidate);
   } catch {
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+    if (start !== -1 && end > start) {
+      try {
+        return JSON.parse(candidate.slice(start, end + 1));
+      } catch {
+        return {};
+      }
+    }
     return {};
   }
 }

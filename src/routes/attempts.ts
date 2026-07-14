@@ -1,8 +1,30 @@
 import { Router } from "express";
 import { requireAuth } from "../middlewares/auth";
 import { supabaseAdmin } from "../services/supabaseAdmin";
+import type { QuestionType } from "../types/question.types";
 
 const router = Router();
+
+const META_KEY = "__meta";
+
+function shuffle<T>(items: T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+function getSelectedQuestionIds(
+  answers: Record<string, unknown> | null | undefined
+): string[] | null {
+  const meta = answers?.[META_KEY] as { questionIds?: string[] } | undefined;
+  if (!Array.isArray(meta?.questionIds) || !meta.questionIds.length) {
+    return null;
+  }
+  return meta.questionIds;
+}
 
 function questionMaxPoints(question: { type: string; answer?: unknown }): number {
   if (["FILL_IN_THE_BLANK", "MATCHING"].includes(question.type)) {
@@ -65,6 +87,16 @@ async function loadQuestionsForAttempt(attempt: any, userId: string) {
 
   const { data, error } = await query;
   if (error) return { data: null, error: error.message };
+
+  const selectedIds = getSelectedQuestionIds(attempt.answers);
+  if (selectedIds?.length) {
+    const selected = new Set(selectedIds);
+    return {
+      data: (data ?? []).filter((q) => selected.has(q.id)),
+      error: null
+    };
+  }
+
   return { data, error: null };
 }
 
@@ -159,6 +191,14 @@ async function finalizeAttempt({
       question_id: question.id,
       topic: question.topic,
       domain: question.domain,
+      is_correct: qScore >= qMax,
+      score: qScore
+    });
+
+    await supabaseAdmin.from("attempt_answers").insert({
+      attempt_id: attempt.id,
+      question_id: question.id,
+      user_answer: userAnswer ?? null,
       is_correct: qScore >= qMax,
       score: qScore
     });
@@ -289,6 +329,131 @@ router
       score,
       maxScore,
       accuracy
+    });
+  })
+  .post("/test/start", requireAuth, async (req, res) => {
+    const {
+      materialTitle,
+      materialId,
+      questionCount = 20,
+      durationMinutes = 30,
+      questionType
+    } = req.body as {
+      materialTitle?: string;
+      materialId?: string;
+      questionCount?: number;
+      durationMinutes?: number;
+      questionType?: QuestionType;
+    };
+
+    const count = Number(questionCount);
+    const duration = Number(durationMinutes);
+
+    if (!materialTitle && !materialId) {
+      return res.status(400).json({
+        error: "materialTitle or materialId is required"
+      });
+    }
+
+    if (!Number.isFinite(count) || count < 5 || count > 200) {
+      return res.status(400).json({
+        error: "questionCount must be between 5 and 200"
+      });
+    }
+
+    if (![30, 45, 60].includes(duration)) {
+      return res.status(400).json({
+        error: "durationMinutes must be 30, 45, or 60"
+      });
+    }
+
+    let resolvedTitle = materialTitle ?? "";
+    let resolvedMaterialId = materialId ?? null;
+
+    if (materialId) {
+      const { data: material } = await supabaseAdmin
+        .from("materials")
+        .select("id, title")
+        .eq("id", materialId)
+        .eq("user_id", req.user!.id)
+        .single();
+
+      if (!material) {
+        return res.status(404).json({ error: "Material not found" });
+      }
+
+      resolvedTitle = material.title;
+      resolvedMaterialId = material.id;
+    } else {
+      const { data: material } = await supabaseAdmin
+        .from("materials")
+        .select("id, title")
+        .eq("user_id", req.user!.id)
+        .eq("title", materialTitle!)
+        .maybeSingle();
+
+      resolvedMaterialId = material?.id ?? null;
+    }
+
+    let query = supabaseAdmin.from("questions").select("*");
+
+    if (resolvedMaterialId) {
+      query = query.eq("material_id", resolvedMaterialId);
+    } else {
+      query = query
+        .eq("creator_id", req.user!.id)
+        .eq("material_title", resolvedTitle);
+    }
+
+    if (questionType) {
+      query = query.eq("type", questionType);
+    }
+
+    const { data: allQuestions, error: loadError } = await query;
+
+    if (loadError) {
+      return res.status(500).json({ error: loadError.message });
+    }
+
+    if (!allQuestions?.length) {
+      return res.status(404).json({ error: "No questions found for this material" });
+    }
+
+    const selectedQuestions = shuffle(allQuestions).slice(
+      0,
+      Math.min(count, allQuestions.length)
+    );
+    const selectedIds = selectedQuestions.map((q) => q.id);
+    const durationSeconds = duration * 60;
+    const expiresAt = new Date(Date.now() + durationSeconds * 1000).toISOString();
+    const maxScore = calculateMaxScore(selectedQuestions);
+
+    const { data: attempt, error } = await supabaseAdmin
+      .from("attempts")
+      .insert({
+        user_id: req.user!.id,
+        material_id: resolvedMaterialId,
+        material_title: resolvedTitle,
+        question_type: questionType ?? null,
+        max_score: maxScore,
+        is_timed: true,
+        duration_seconds: durationSeconds,
+        expires_at: expiresAt,
+        answers: {
+          [META_KEY]: { questionIds: selectedIds }
+        }
+      })
+      .select()
+      .single();
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.status(201).json({
+      attempt,
+      questions: selectedQuestions,
+      timing: { expiresAt, durationSeconds, durationMinutes: duration }
     });
   })
   .post("/start", requireAuth, async (req, res) => {
@@ -736,9 +901,14 @@ router
       return res.status(403).json({ error: "Time expired" });
     }
 
+    const mergedAnswers = {
+      ...(attempt.answers ?? {}),
+      ...answers
+    };
+
     await supabaseAdmin
       .from("attempts")
-      .update({ answers })
+      .update({ answers: mergedAnswers })
       .eq("id", id)
       .eq("user_id", req.user!.id);
 
@@ -752,7 +922,7 @@ router
     const result = await finalizeAttempt({
       attempt,
       questions,
-      answers,
+      answers: mergedAnswers,
       userId: req.user!.id
     });
 
@@ -781,12 +951,62 @@ router
       .eq("user_id", req.user!.id)
       .single();
 
+    if (!attempt) {
+      return res.status(404).json({ error: "Attempt not found" });
+    }
+
     const { data: answers } = await supabaseAdmin
       .from("attempt_answers")
       .select("*, questions(*)")
       .eq("attempt_id", id);
 
-    res.json({ attempt, answers });
+    const { data: questions, error: loadError } =
+      await loadQuestionsForAttempt(attempt, req.user!.id);
+
+    if (loadError || !questions?.length) {
+      return res.json({ attempt, answers: answers ?? [], questions: [] });
+    }
+
+    const answerMap = (attempt.answers ?? {}) as Record<string, unknown>;
+    const meta = answerMap[META_KEY];
+    const userAnswers = { ...answerMap };
+    delete userAnswers[META_KEY];
+
+    const results = questions.map((question) => {
+      const saved = answers?.find((row) => row.question_id === question.id);
+      const userAnswer =
+        saved?.user_answer ?? userAnswers[question.id] ?? null;
+      const qMax = questionMaxPoints(question);
+      const qScore =
+        saved?.score ?? gradeQuestion(question, userAnswer);
+      const isCorrect =
+        saved?.is_correct ?? (qScore >= qMax && qMax > 0);
+
+      return {
+        question,
+        userAnswer,
+        correctAnswer: question.answer,
+        isCorrect,
+        score: qScore,
+        maxScore: qMax
+      };
+    });
+
+    const missed = results.filter((row) => !row.isCorrect);
+
+    res.json({
+      attempt,
+      answers: answers ?? [],
+      questions,
+      results,
+      missed,
+      summary: {
+        score: attempt.score ?? results.reduce((sum, r) => sum + r.score, 0),
+        maxScore: attempt.max_score ?? calculateMaxScore(questions),
+        accuracy: attempt.accuracy,
+        timeUsedSeconds: attempt.time_used_seconds
+      }
+    });
   });
 
 export default router;
