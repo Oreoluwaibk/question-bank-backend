@@ -16,6 +16,20 @@ import { validateRegistrationInput } from '../lib/authValidation';
 
 const router = Router();
 
+async function recordTermsAcceptance(userId: string) {
+  const acceptedAt = new Date().toISOString();
+  const { error } = await supabaseAdmin
+    .from('profiles')
+    .update({ terms_accepted_at: acceptedAt })
+    .eq('id', userId);
+
+  if (error) {
+    throw error;
+  }
+
+  return acceptedAt;
+}
+
 const uploadsDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -65,7 +79,13 @@ router.post('/signup', async (req, res) => {
   });
 })
 .post('/register', async (req: Request, res: Response) => {
-  const { email, password, firstName, lastName, phoneNumber } = req.body;
+  const { email, password, firstName, lastName, phoneNumber, acceptedTerms } = req.body;
+
+  if (!acceptedTerms) {
+    return res.status(400).json({
+      error: 'You must accept the Terms & Conditions and Privacy Policy',
+    });
+  }
 
   const validationError = validateRegistrationInput({
     email,
@@ -92,12 +112,14 @@ router.post('/signup', async (req, res) => {
   }
 
   if (data.user?.id) {
+    const acceptedAt = new Date().toISOString();
     const { error: profileError } = await supabaseAdmin.from('profiles').upsert(
       {
         id: data.user.id,
         first_name: firstName.trim(),
         last_name: lastName.trim(),
         phone_number: phoneNumber.trim(),
+        terms_accepted_at: acceptedAt,
       },
       { onConflict: 'id' }
     );
@@ -250,7 +272,18 @@ router.post('/signup', async (req, res) => {
       deviceName,
       refreshToken,
     });
-    res.json({ message: 'Session registered' });
+
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('terms_accepted_at')
+      .eq('id', userId)
+      .maybeSingle();
+
+    res.json({
+      message: 'Session registered',
+      termsAccepted: Boolean(profile?.terms_accepted_at),
+      termsAcceptedAt: profile?.terms_accepted_at ?? null,
+    });
   } catch (err) {
     const deviceErr = deviceErrorResponse(res, err);
     if (deviceErr) return deviceErr;
@@ -324,9 +357,28 @@ router.post('/signup', async (req, res) => {
 
   res.json(data);
 })
+.post('/accept-terms', requireAuth, async (req: Request, res: Response) => {
+  const userId = req.user?.id;
+
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const termsAcceptedAt = await recordTermsAcceptance(userId);
+    res.json({
+      message: 'Terms accepted',
+      terms_accepted_at: termsAcceptedAt,
+    });
+  } catch (err: any) {
+    return res.status(400).json({
+      error: err.message ?? 'Could not record terms acceptance',
+    });
+  }
+})
 .put('/me', requireAuth, async (req, res) => {
   const userId = req.user?.id;
-  const updates = req.body;
+  const { terms_accepted_at: _ignored, ...updates } = req.body;
 
   const { error } = await supabaseAdmin
     .from('profiles')
