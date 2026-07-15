@@ -10,10 +10,10 @@ export type SubscriptionPlan = {
 
 export const FREE_PLAN: SubscriptionPlan = {
   tier: "FREE",
-  material_limit: 0,
-  attempt_limit: 1,
+  material_limit: 1,
+  attempt_limit: 2,
   allow_reattempt: false,
-  allow_timed: false,
+  allow_timed: true,
 };
 
 export const PRO_PLAN: SubscriptionPlan = {

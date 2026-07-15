@@ -4,14 +4,16 @@ import fs from "fs";
 import path from "path";
 import {
   convertBufferToText,
+  detectDocumentKind,
   normalizeDisplayName,
+  UNSUPPORTED_DOCUMENT_MESSAGE,
 } from "../controller/upload";
 import { extractQuestions } from "../services/ai-question.service";
 import { sanitizeQuestionsForDb } from "../lib/questionSanitizer";
 import { requireAuth } from "../middlewares/auth";
 import { supabaseAdmin } from "../services/supabaseAdmin";
 import type { QuestionType } from "../types/question.types";
-import { requireProSubscription } from "../services/subscriptionService";
+import { requireMaterialUploadPermission } from "../services/subscriptionService";
 import { subscriptionErrorResponse } from "../lib/subscriptionErrors";
 
 const DEFAULT_UPLOAD_TYPES: QuestionType[] = ["MCQ"];
@@ -144,9 +146,13 @@ async function processDocumentUpload(
   const questionTypes = options?.questionTypes ?? DEFAULT_UPLOAD_TYPES;
   const questionCount = options?.questionCount ?? DEFAULT_UPLOAD_COUNT;
   const appendToMaterialTitle = options?.appendToMaterialTitle?.trim();
+  const materialTitleFromFile = displayName.replace(/\.[^/.]+$/, "").trim();
 
   try {
-    await requireProSubscription(userId);
+    await requireMaterialUploadPermission(userId, {
+      appendToMaterialTitle,
+      materialTitle: materialTitleFromFile,
+    });
   } catch (err) {
     const response = subscriptionErrorResponse(res, err);
     if (response) return response;
@@ -156,8 +162,11 @@ async function processDocumentUpload(
   const { error, text } = await convertBufferToText(buffer, displayName);
 
   if (error) {
-    if (error === "Unsupported file type") {
-      return res.status(415).json({ error: "Unsupported file type" });
+    if (
+      error === "Unsupported file type" ||
+      error === UNSUPPORTED_DOCUMENT_MESSAGE
+    ) {
+      return res.status(415).json({ error: UNSUPPORTED_DOCUMENT_MESSAGE });
     }
     return res.status(500).json({ error: error || "Failed to extract text" });
   }
@@ -168,6 +177,7 @@ async function processDocumentUpload(
     });
   }
 
+  const extractStartedAt = Date.now();
   let extractedQuestions;
   try {
     extractedQuestions = await extractQuestions(
@@ -175,8 +185,14 @@ async function processDocumentUpload(
       questionTypes,
       questionCount
     );
+    console.log(
+      `[upload] Generated ${extractedQuestions.length} questions in ${Date.now() - extractStartedAt}ms`
+    );
   } catch (err) {
-    console.error("Question extraction failed:", err);
+    console.error(
+      `[upload] Question extraction failed after ${Date.now() - extractStartedAt}ms:`,
+      err
+    );
     return res.status(502).json({
       error: "Failed to extract questions from document",
       details:
@@ -293,6 +309,10 @@ router
 
       try {
         const buffer = Buffer.from(data, "base64");
+        const displayName = normalizeDisplayName(fileName);
+        if (!detectDocumentKind(buffer, displayName)) {
+          return res.status(415).json({ error: UNSUPPORTED_DOCUMENT_MESSAGE });
+        }
         return processDocumentUpload(req, res, buffer, fileName, {
           appendToMaterialTitle,
           questionCount: parseQuestionCount(questionCount),
@@ -314,6 +334,9 @@ router
 
     try {
       const buffer = fs.readFileSync(req.file.path);
+      if (!detectDocumentKind(buffer, displayName)) {
+        return res.status(415).json({ error: UNSUPPORTED_DOCUMENT_MESSAGE });
+      }
       return processDocumentUpload(req, res, buffer, displayName);
     } catch {
       return res.status(500).json({ error: "Failed to read uploaded file" });

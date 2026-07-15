@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { requireAuth } from "../middlewares/auth";
 import { supabaseAdmin } from "../services/supabaseAdmin";
+import { requireTestStartPermission } from "../services/subscriptionService";
+import { subscriptionErrorResponse } from "../lib/subscriptionErrors";
 import type { QuestionType } from "../types/question.types";
 
 const router = Router();
@@ -111,6 +113,12 @@ export async function createAttempt({
   questionType?: string;
   isTimed: boolean;
 }) {
+  await requireTestStartPermission(userId, {
+    materialTitle,
+    questionType: questionType ?? null,
+    isTimed,
+  });
+
   let query = supabaseAdmin
     .from("questions")
     .select("*")
@@ -237,6 +245,18 @@ router
 
     if (!materialTitle) {
       return res.status(400).json({ error: "materialTitle is required" });
+    }
+
+    try {
+      await requireTestStartPermission(req.user!.id, {
+        materialTitle,
+        questionType: questionType ?? null,
+        isTimed: false,
+      });
+    } catch (err) {
+      const response = subscriptionErrorResponse(res, err);
+      if (response) return response;
+      return res.status(403).json({ error: "Subscription required" });
     }
 
     let query = supabaseAdmin
@@ -395,6 +415,19 @@ router
       resolvedMaterialId = material?.id ?? null;
     }
 
+    try {
+      await requireTestStartPermission(req.user!.id, {
+        materialId: resolvedMaterialId,
+        materialTitle: resolvedTitle,
+        questionType: questionType ?? null,
+        isTimed: true,
+      });
+    } catch (err) {
+      const response = subscriptionErrorResponse(res, err);
+      if (response) return response;
+      return res.status(403).json({ error: "Subscription required" });
+    }
+
     let query = supabaseAdmin.from("questions").select("*");
 
     if (resolvedMaterialId) {
@@ -463,20 +496,16 @@ router
       return res.status(400).json({ error: "materialId is required" });
     }
 
-    const { data: subscription } = await supabaseAdmin
-      .from("subscriptions")
-      .select("*")
-      .eq("user_id", req.user!.id)
-      .single();
-
-    if (!subscription) {
-      return res.status(403).json({ error: "Subscription not found" });
-    }
-
-    if (isTimed && !subscription.allow_timed) {
-      return res.status(403).json({
-        error: "Timed attempts are not allowed on your plan"
+    try {
+      await requireTestStartPermission(req.user!.id, {
+        materialId,
+        questionType: questionType ?? null,
+        isTimed: Boolean(isTimed),
       });
+    } catch (err) {
+      const response = subscriptionErrorResponse(res, err);
+      if (response) return response;
+      return res.status(403).json({ error: "Subscription required" });
     }
 
     const { data: material } = await supabaseAdmin
@@ -488,34 +517,6 @@ router
 
     if (!material) {
       return res.status(404).json({ error: "Material not found" });
-    }
-
-    const { count: totalAttempts } = await supabaseAdmin
-      .from("attempts")
-      .select("*", { count: "exact", head: true })
-      .eq("user_id", req.user!.id);
-
-    if ((totalAttempts ?? 0) >= subscription.attempt_limit) {
-      return res.status(403).json({
-        error: "Attempt limit reached for your subscription"
-      });
-    }
-
-    const { count: materialAttempts } = await supabaseAdmin
-      .from("attempts")
-      .select("*", { count: "exact", head: true })
-      .eq("user_id", req.user!.id)
-      .eq("material_id", materialId)
-      .eq("question_type", questionType ?? null);
-
-    if (
-      materialAttempts &&
-      materialAttempts > 0 &&
-      !subscription.allow_reattempt
-    ) {
-      return res.status(403).json({
-        error: "Retakes are not allowed on your plan"
-      });
     }
 
     let q = supabaseAdmin
@@ -622,6 +623,8 @@ router
         questions: result.questions
       });
     } catch (err: any) {
+      const response = subscriptionErrorResponse(res, err);
+      if (response) return response;
       if (err.message === "NO_QUESTIONS") {
         return res.status(404).json({ error: "No questions found" });
       }

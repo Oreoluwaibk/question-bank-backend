@@ -101,6 +101,25 @@ async function upsertDefaultDocument(slug: LegalSlug) {
   return mapRow(data as LegalRow);
 }
 
+function fallbackDocument(slug: LegalSlug): LegalDocument {
+  const defaults = DEFAULT_LEGAL_BY_SLUG[slug];
+  const version = new Date().toISOString().slice(0, 10);
+
+  return {
+    slug,
+    version,
+    title: defaults.title,
+    lastUpdated: defaults.lastUpdated,
+    intro: defaults.intro,
+    sections: defaults.sections,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function isMissingLegalTableError(message: string) {
+  return /legal_documents/i.test(message);
+}
+
 export async function getPublishedLegalDocument(slug: LegalSlug) {
   const { data, error } = await supabaseAdmin
     .from("legal_documents")
@@ -109,11 +128,24 @@ export async function getPublishedLegalDocument(slug: LegalSlug) {
     .maybeSingle();
 
   if (error) {
+    if (isMissingLegalTableError(error.message)) {
+      return fallbackDocument(slug);
+    }
     throw new Error(error.message);
   }
 
   if (!data) {
-    return upsertDefaultDocument(slug);
+    try {
+      return await upsertDefaultDocument(slug);
+    } catch (upsertError) {
+      if (
+        upsertError instanceof Error &&
+        isMissingLegalTableError(upsertError.message)
+      ) {
+        return fallbackDocument(slug);
+      }
+      throw upsertError;
+    }
   }
 
   return mapRow(data as LegalRow);

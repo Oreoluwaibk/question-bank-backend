@@ -21,6 +21,11 @@ import {
 } from '../services/accountService';
 import { validateRegistrationInput } from '../lib/authValidation';
 import { getPublishedTermsVersion } from '../services/legalService';
+import {
+  profileNamesFromAuthUser,
+  recordTermsAcceptance,
+  updateUserProfile,
+} from '../services/profileService';
 
 const router = Router();
 
@@ -53,24 +58,6 @@ async function findDeactivatedAtByEmail(email: string) {
 
     page += 1;
   }
-}
-
-async function recordTermsAcceptance(userId: string) {
-  const acceptedAt = new Date().toISOString();
-  const termsVersion = await getPublishedTermsVersion();
-  const { error } = await supabaseAdmin
-    .from('profiles')
-    .update({
-      terms_accepted_at: acceptedAt,
-      terms_accepted_version: termsVersion,
-    })
-    .eq('id', userId);
-
-  if (error) {
-    throw error;
-  }
-
-  return { acceptedAt, termsVersion };
 }
 
 const uploadsDir = path.join(process.cwd(), 'uploads');
@@ -480,29 +467,33 @@ router.post('/signup', async (req, res) => {
       terms_accepted_version: termsVersion,
     });
   } catch (err: any) {
-    return res.status(400).json({
-      error: err.message ?? 'Could not record terms acceptance',
+    const message =
+      err instanceof Error ? err.message : 'Could not record terms acceptance';
+    console.error('Accept terms failed:', err);
+    return res.status(/column|schema|relation/i.test(message) ? 500 : 400).json({
+      error: message,
     });
   }
 })
 .put('/me', requireAuth, async (req, res) => {
   const userId = req.user?.id;
-  const {
-    terms_accepted_at: _ignoredTermsAt,
-    terms_accepted_version: _ignoredTermsVersion,
-    ...updates
-  } = req.body;
 
-  const { error } = await supabaseAdmin
-    .from('profiles')
-    .update(updates)
-    .eq('id', userId);
-
-  if (error) {
-    return res.status(400).json({ error: error.message });
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  res.json({ message: 'Profile updated' });
+  try {
+    const body = { ...(req.body as Record<string, unknown>) };
+    delete body.terms_accepted_at;
+    delete body.terms_accepted_version;
+
+    const profile = await updateUserProfile(userId, body);
+    res.json(profile);
+  } catch (err) {
+    return res.status(400).json({
+      error: err instanceof Error ? err.message : 'Could not update profile',
+    });
+  }
 });
 
 async function saveAvatarFromBuffer(
@@ -521,17 +512,12 @@ async function saveAvatarFromBuffer(
 
   try {
     const avatarUrl = await uploadAvatarBuffer(userId, buffer, mime);
+    const profile = await updateUserProfile(userId, { avatar_url: avatarUrl });
 
-    const { error: profileError } = await supabaseAdmin
-      .from('profiles')
-      .update({ avatar_url: avatarUrl })
-      .eq('id', userId);
-
-    if (profileError) {
-      return res.status(400).json({ error: profileError.message });
-    }
-
-    res.json({ avatar_url: avatarUrl });
+    res.json({
+      avatar_url: profile.avatar_url ?? avatarUrl,
+      profile,
+    });
   } catch (err: any) {
     return res.status(400).json({
       error: err.message ?? 'Could not save profile picture',

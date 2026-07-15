@@ -20,6 +20,10 @@ export async function getDeactivatedAt(userId: string) {
     .maybeSingle();
 
   if (error) {
+    // Allow auth to work before account_deactivation.sql has been applied.
+    if (/deactivated_at/i.test(error.message)) {
+      return null;
+    }
     throw new Error(error.message);
   }
 

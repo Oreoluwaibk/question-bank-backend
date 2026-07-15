@@ -70,28 +70,38 @@ async function getUsageCounts(userId: string) {
   };
 }
 
+function effectivePlan(
+  subscription: SubscriptionRow,
+  pro: boolean
+): SubscriptionPlan {
+  return pro ? PRO_PLAN : FREE_PLAN;
+}
+
 export async function getSubscriptionStatus(userId: string) {
   const subscription = await getOrCreateSubscription(userId);
   const usage = await getUsageCounts(userId);
   const pro = isProTier(subscription.tier, subscription.stripe_status ?? null);
+  const plan = effectivePlan(subscription, pro);
 
   return {
     tier: subscription.tier,
     isPro: pro,
-    canAddMaterials: pro,
+    canAddMaterials: pro || usage.materials < plan.material_limit,
+    canAppendToMaterials: pro,
     canExportQuestions: pro,
-    materialLimit: subscription.material_limit,
-    attemptLimit: subscription.attempt_limit,
-    allowReattempt: subscription.allow_reattempt,
-    allowTimed: subscription.allow_timed,
+    canStartTest: pro || usage.attempts < plan.attempt_limit,
+    materialLimit: plan.material_limit,
+    attemptLimit: plan.attempt_limit,
+    allowReattempt: plan.allow_reattempt,
+    allowTimed: plan.allow_timed,
     billingStatus: subscription.stripe_status ?? null,
     currentPeriodEnd: subscription.current_period_end ?? null,
     usage,
     limits: {
-      materialsReached: usage.materials >= subscription.material_limit,
-      attemptsReached: usage.attempts >= subscription.attempt_limit,
+      materialsReached: usage.materials >= plan.material_limit,
+      attemptsReached: usage.attempts >= plan.attempt_limit,
     },
-    plan: pro ? PRO_PLAN : FREE_PLAN,
+    plan,
   };
 }
 
@@ -102,6 +112,119 @@ export async function requireProSubscription(userId: string) {
     (error as Error & { code: string }).code = "SUBSCRIPTION_REQUIRED";
     throw error;
   }
+  return status;
+}
+
+async function materialExistsForUser(userId: string, title: string) {
+  const { data, error } = await supabaseAdmin
+    .from("materials")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("title", title)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return Boolean(data);
+}
+
+export async function requireMaterialUploadPermission(
+  userId: string,
+  options?: { appendToMaterialTitle?: string; materialTitle?: string }
+) {
+  const status = await getSubscriptionStatus(userId);
+  if (status.isPro) {
+    return status;
+  }
+
+  const explicitAppend = Boolean(options?.appendToMaterialTitle?.trim());
+  if (explicitAppend) {
+    const error = new Error(
+      "Subscribe to Pro to add documents to existing materials."
+    );
+    (error as Error & { code: string }).code = "SUBSCRIPTION_REQUIRED";
+    throw error;
+  }
+
+  const materialTitle = options?.materialTitle?.trim();
+  if (materialTitle && (await materialExistsForUser(userId, materialTitle))) {
+    const error = new Error(
+      "Subscribe to Pro to add documents to existing materials."
+    );
+    (error as Error & { code: string }).code = "SUBSCRIPTION_REQUIRED";
+    throw error;
+  }
+
+  if (status.limits.materialsReached) {
+    const error = new Error(
+      "Free plan includes 1 document upload. Subscribe to Pro for unlimited uploads."
+    );
+    (error as Error & { code: string }).code = "SUBSCRIPTION_REQUIRED";
+    throw error;
+  }
+
+  return status;
+}
+
+export async function requireTestStartPermission(
+  userId: string,
+  options?: {
+    materialId?: string | null;
+    materialTitle?: string;
+    questionType?: string | null;
+    isTimed?: boolean;
+  }
+) {
+  const status = await getSubscriptionStatus(userId);
+  const isTimed = options?.isTimed !== false;
+
+  if (isTimed && !status.allowTimed) {
+    const error = new Error("Timed tests are a Pro feature.");
+    (error as Error & { code: string }).code = "SUBSCRIPTION_REQUIRED";
+    throw error;
+  }
+
+  if (status.limits.attemptsReached) {
+    const error = new Error(
+      status.isPro
+        ? "Attempt limit reached for your subscription."
+        : "Free plan includes 2 practice tests. Subscribe to Pro for unlimited tests and retakes."
+    );
+    (error as Error & { code: string }).code = "SUBSCRIPTION_REQUIRED";
+    throw error;
+  }
+
+  if (status.isPro && !status.allowReattempt) {
+    let query = supabaseAdmin
+      .from("attempts")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", userId);
+
+    if (options?.materialId) {
+      query = query.eq("material_id", options.materialId);
+    } else if (options?.materialTitle) {
+      query = query.eq("material_title", options.materialTitle);
+    } else {
+      return status;
+    }
+
+    if (options?.questionType) {
+      query = query.eq("question_type", options.questionType);
+    } else {
+      query = query.is("question_type", null);
+    }
+
+    const { count: materialAttempts } = await query;
+
+    if (materialAttempts && materialAttempts > 0) {
+      const error = new Error("Retakes are not allowed on your plan.");
+      (error as Error & { code: string }).code = "SUBSCRIPTION_REQUIRED";
+      throw error;
+    }
+  }
+
   return status;
 }
 

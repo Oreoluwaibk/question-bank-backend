@@ -28,6 +28,32 @@ async function authenticateRequest(req: Request, res: Response) {
   return true;
 }
 
+async function ensureActiveAccount(
+  userId: string,
+  res: Response
+): Promise<boolean> {
+  try {
+    if (!(await isAccountActive(userId))) {
+      res.status(403).json({
+        error: ACCOUNT_DEACTIVATED_MESSAGE,
+        code: 'ACCOUNT_DEACTIVATED',
+      });
+      return false;
+    }
+  } catch (err) {
+    console.error('Account status check failed:', err);
+    res.status(500).json({
+      error:
+        err instanceof Error
+          ? err.message
+          : 'Could not verify account status',
+    });
+    return false;
+  }
+
+  return true;
+}
+
 export async function requireAuthOnly(
   req: Request,
   res: Response,
@@ -52,11 +78,8 @@ export async function requireActiveAccount(
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  if (!(await isAccountActive(userId))) {
-    return res.status(403).json({
-      error: ACCOUNT_DEACTIVATED_MESSAGE,
-      code: 'ACCOUNT_DEACTIVATED',
-    });
+  if (!(await ensureActiveAccount(userId, res))) {
+    return;
   }
 
   next();
@@ -77,11 +100,8 @@ export async function requireAuth(
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  if (!(await isAccountActive(userId))) {
-    return res.status(403).json({
-      error: ACCOUNT_DEACTIVATED_MESSAGE,
-      code: 'ACCOUNT_DEACTIVATED',
-    });
+  if (!(await ensureActiveAccount(userId, res))) {
+    return;
   }
 
   next();

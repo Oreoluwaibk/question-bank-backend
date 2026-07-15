@@ -35,12 +35,13 @@ const ALLOWED_DOMAINS: QuestionDomain[] = [
 ];
 
 const HARD_CAP = 200;
-const CHUNK_SIZE = 4_000;
-const QUESTIONS_PER_CALL = 10;
+/** Keep prompts small — one model call handles the full batch. */
+const SOURCE_TEXT_BUDGET = 14_000;
+const MAX_AI_CALLS = 2;
 
 /**
  * MAIN ENTRY
- * maxQuestions = MINIMUM number required
+ * maxQuestions = target number of questions to return
  */
 export async function extractQuestions(
   text: string,
@@ -51,146 +52,63 @@ export async function extractQuestions(
     throw new Error("No question types provided");
   }
 
-  const TARGET = Math.min(maxQuestions, HARD_CAP);
-  const chunks = splitIntoChunks(text, CHUNK_SIZE);
-
+  const target = Math.min(maxQuestions, HARD_CAP);
+  const sourceText = prepareSourceText(text, SOURCE_TEXT_BUDGET);
   let questions: Question[] = [];
 
-  // 1️⃣ FIRST: Extract from document
-  for (const chunk of chunks) {
-    if (questions.length >= TARGET) break;
-
-    const remaining = TARGET - questions.length;
-    const extracted = await extractFromChunk(
-      chunk,
+  for (let call = 0; call < MAX_AI_CALLS && questions.length < target; call++) {
+    const remaining = target - questions.length;
+    const batch = await requestQuestions(
+      sourceText,
       allowedTypes,
-      Math.min(remaining, QUESTIONS_PER_CALL)
-    );
-
-    questions.push(...extracted);
-  }
-
-  // 2️⃣ SECOND: Generate missing questions if needed
-  if (questions.length < TARGET) {
-    const missing = TARGET - questions.length;
-
-    const generated = await generateAdditionalQuestions(
-      text,
-      allowedTypes,
-      missing,
+      remaining,
       questions
     );
 
-    questions.push(...generated);
+    questions = dedupeQuestions([...questions, ...batch]);
   }
 
-  return questions.slice(0, TARGET).map((q, i) => ({
+  return questions.slice(0, target).map((q, i) => ({
     ...q,
     number: i + 1
   }));
 }
 
-/* ---------------------------------- */
-/* -------- EXTRACTION STEP ---------- */
-/* ---------------------------------- */
-
-async function extractFromChunk(
-  text: string,
-  allowedTypes: QuestionType[],
-  maxQuestions: number
-): Promise<Question[]> {
-  const content = await cursorPrompt(`
-Extract questions from the text.
-
-Allowed types:
-${allowedTypes.join(", ")}
-
-Rules:
-- Extract UP TO ${maxQuestions} questions
-- Do NOT invent new content
-- Do NOT repeat questions
-- Assign ONE domain
-- Do NOT use tools
-- Output JSON only, no markdown fences
-- MATCHING answers MUST be: [{ "left": "term", "right": "match" }, ...]
-- FILL_IN_THE_BLANK answers MUST be: ["blank1", "blank2", ...]
-- MCQ answer MUST be one of the options strings
-- TRUE_FALSE answer MUST be boolean true or false
-
-Return:
-{
-  "questions": [
-    {
-      "type": "MCQ" | "TRUE_FALSE" | "SHORT_ANSWER" | "LONG_ANSWER" | "FILL_IN_THE_BLANK" | "MATCHING",
-      "question": string,
-      "options": string[] | null,
-      "answer": string | boolean | null,
-      "topic": string | null,
-      "domain": "${ALLOWED_DOMAINS.join('" | "')}"
-    }
-  ]
-}
-
-TEXT:
-${text}
-`);
-
-  const raw = parseJsonResponse(content);
-
-  return Array.isArray(raw.questions)
-    ? raw.questions
-        .map(normalizeQuestion)
-        .filter((question): question is Question => question !== null)
-    : [];
-}
-
-/* ---------------------------------- */
-/* -------- GENERATION STEP ----------- */
-/* ---------------------------------- */
-
-async function generateAdditionalQuestions(
+async function requestQuestions(
   sourceText: string,
   allowedTypes: QuestionType[],
   count: number,
   existing: Question[]
 ): Promise<Question[]> {
+  const avoidList =
+    existing.length > 0
+      ? `\nDo not repeat or rephrase these:\n${existing
+          .slice(-20)
+          .map((q) => `- ${q.question}`)
+          .join("\n")}`
+      : "";
+
   const content = await cursorPrompt(`
-Generate NEW exam questions based on the material.
+Create exactly ${count} practice questions from the study material.
 
-Allowed types:
-${allowedTypes.join(", ")}
+Allowed types: ${allowedTypes.join(", ")}
 
-Rules:
-- Generate EXACTLY ${count} questions
-- Do NOT repeat or rephrase existing questions
-- Base questions on the concepts in the material
-- Assign ONE domain
+Output rules:
+- Return JSON only (no markdown fences)
 - Do NOT use tools
-- Output JSON only, no markdown fences
-- MATCHING answers MUST be: [{ "left": "term", "right": "match" }, ...]
-- FILL_IN_THE_BLANK answers MUST be: ["blank1", "blank2", ...]
-- MCQ answer MUST be one of the options strings
-- TRUE_FALSE answer MUST be boolean true or false
+- Base questions on the material below
+- MCQ: 4 options, answer must equal one option string
+- TRUE_FALSE: answer must be boolean
+- FILL_IN_THE_BLANK: answer is string[]
+- MATCHING: answer is [{ "left": "...", "right": "..." }, ...]
+- Assign one domain from: ${ALLOWED_DOMAINS.join(", ")}
+${avoidList}
 
-Existing questions (DO NOT DUPLICATE):
-${existing.map(q => `- ${q.question}`).join("\n")}
-
-Return:
-{
-  "questions": [
-    {
-      "type": "MCQ" | "TRUE_FALSE" | "SHORT_ANSWER" | "LONG_ANSWER" | "FILL_IN_THE_BLANK" | "MATCHING",
-      "question": string,
-      "options": string[] | null,
-      "answer": string | boolean | null,
-      "topic": string | null,
-      "domain": "${ALLOWED_DOMAINS.join('" | "')}"
-    }
-  ]
-}
+Schema:
+{"questions":[{"type":"MCQ","question":"...","options":["A","B","C","D"],"answer":"A","topic":"...","domain":"GENERAL"}]}
 
 MATERIAL:
-${sourceText.slice(0, 6_000)}
+${sourceText}
 `);
 
   const raw = parseJsonResponse(content);
@@ -202,9 +120,39 @@ ${sourceText.slice(0, 6_000)}
     : [];
 }
 
-/* ---------------------------------- */
-/* -------- NORMALIZATION ------------ */
-/* ---------------------------------- */
+function prepareSourceText(text: string, maxLength: number): string {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+
+  const slice = trimmed.slice(0, maxLength);
+  const lastBreak = Math.max(
+    slice.lastIndexOf(". "),
+    slice.lastIndexOf("\n"),
+    slice.lastIndexOf(" ")
+  );
+
+  if (lastBreak > maxLength * 0.7) {
+    return slice.slice(0, lastBreak).trim();
+  }
+
+  return slice.trim();
+}
+
+function dedupeQuestions(questions: Question[]): Question[] {
+  const seen = new Set<string>();
+  const result: Question[] = [];
+
+  for (const question of questions) {
+    const key = question.question.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(question);
+  }
+
+  return result;
+}
 
 function normalizeQuestion(q: any): Question | null {
   const sanitized = sanitizeQuestionForDb(q);
@@ -222,22 +170,6 @@ function toQuestion(sanitized: SanitizedQuestion): Question {
     topic: sanitized.topic,
     domain: sanitized.domain,
   };
-}
-
-/* ---------------------------------- */
-/* -------- HELPERS ------------------ */
-/* ---------------------------------- */
-
-function splitIntoChunks(text: string, size: number): string[] {
-  const chunks: string[] = [];
-  let i = 0;
-
-  while (i < text.length) {
-    chunks.push(text.slice(i, i + size));
-    i += size;
-  }
-
-  return chunks;
 }
 
 function parseJsonResponse(content: string | null | undefined): { questions?: unknown[] } {
