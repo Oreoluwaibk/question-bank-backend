@@ -422,6 +422,48 @@ export async function listMaterials(query = "", page = 1, limit = 20) {
   };
 }
 
+const ATTEMPT_DETAIL_SELECT =
+  "id, user_id, score, max_score, accuracy, completed_at, created_at, is_timed, question_type, time_used_seconds";
+
+async function getAttemptsForMaterial(
+  materialId: string,
+  materialTitle: string,
+  userId: string
+) {
+  const [byMaterialId, byLegacyTitle] = await Promise.all([
+    supabaseAdmin
+      .from("attempts")
+      .select(ATTEMPT_DETAIL_SELECT)
+      .eq("material_id", materialId)
+      .order("created_at", { ascending: false }),
+    supabaseAdmin
+      .from("attempts")
+      .select(ATTEMPT_DETAIL_SELECT)
+      .eq("material_title", materialTitle)
+      .eq("user_id", userId)
+      .is("material_id", null)
+      .order("created_at", { ascending: false }),
+  ]);
+
+  if (byMaterialId.error) {
+    throw new Error(byMaterialId.error.message);
+  }
+  if (byLegacyTitle.error) {
+    throw new Error(byLegacyTitle.error.message);
+  }
+
+  const merged = new Map<string, NonNullable<(typeof byMaterialId.data)[number]>>();
+  for (const attempt of [...(byMaterialId.data ?? []), ...(byLegacyTitle.data ?? [])]) {
+    merged.set(attempt.id, attempt);
+  }
+
+  return [...merged.values()].sort(
+    (a, b) =>
+      new Date(b.created_at ?? 0).getTime() -
+      new Date(a.created_at ?? 0).getTime()
+  );
+}
+
 export async function getMaterialDetail(materialId: string) {
   const { data: material, error } = await supabaseAdmin
     .from("materials")
@@ -434,8 +476,7 @@ export async function getMaterialDetail(materialId: string) {
   }
 
   const materialRow = material as MaterialRow;
-  const [profileMap, emailMap, questionsResult, attemptsResult] =
-    await Promise.all([
+  const [profileMap, emailMap, questionsResult, attempts] = await Promise.all([
       getProfileMap([materialRow.user_id]),
       getEmailMap([materialRow.user_id]),
       supabaseAdmin
@@ -446,26 +487,19 @@ export async function getMaterialDetail(materialId: string) {
         .eq("creator_id", materialRow.user_id)
         .eq("material_title", materialRow.title)
         .order("created_at", { ascending: true }),
-      supabaseAdmin
-        .from("attempts")
-        .select(
-          "id, user_id, score, max_score, accuracy, completed_at, created_at, is_timed, question_type, time_used_seconds"
-        )
-        .or(
-          `material_id.eq.${materialRow.id},and(material_title.eq.${materialRow.title},user_id.eq.${materialRow.user_id})`
-        )
-        .order("created_at", { ascending: false }),
+      getAttemptsForMaterial(
+        materialRow.id,
+        materialRow.title,
+        materialRow.user_id
+      ),
     ]);
 
   if (questionsResult.error) {
     throw new Error(questionsResult.error.message);
   }
-  if (attemptsResult.error) {
-    throw new Error(attemptsResult.error.message);
-  }
 
   const attemptUserIds = [
-    ...new Set((attemptsResult.data ?? []).map((attempt) => attempt.user_id)),
+    ...new Set(attempts.map((attempt) => attempt.user_id)),
   ];
   const [attemptProfileMap, attemptEmailMap] = await Promise.all([
     getProfileMap(attemptUserIds),
@@ -473,7 +507,7 @@ export async function getMaterialDetail(materialId: string) {
   ]);
 
   const profile = profileMap.get(materialRow.user_id);
-  const attemptStats = summarizeAttempts(attemptsResult.data ?? []);
+  const attemptStats = summarizeAttempts(attempts);
 
   return {
     id: materialRow.id,
@@ -497,7 +531,7 @@ export async function getMaterialDetail(materialId: string) {
       isPublished: question.is_published,
       createdAt: question.created_at,
     })),
-    attempts: (attemptsResult.data ?? []).map((attempt) => {
+    attempts: attempts.map((attempt) => {
       const attemptProfile = attemptProfileMap.get(attempt.user_id);
       return {
         id: attempt.id,
