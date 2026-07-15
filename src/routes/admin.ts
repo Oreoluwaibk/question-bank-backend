@@ -20,6 +20,11 @@ import {
   updateLegalDocument,
   type LegalDocumentContent,
 } from "../services/legalService";
+import {
+  completeDeletionRequest,
+  listDeletionRequests,
+  updateDeletionRequestStatus,
+} from "../services/deletionRequestService";
 
 const router = Router();
 
@@ -213,6 +218,75 @@ router.delete(
       res.status(500).json({
         error:
           error instanceof Error ? error.message : "Failed to remove device",
+      });
+    }
+  }
+);
+
+router.get("/deletion-requests", async (req: Request, res: Response) => {
+  try {
+    const status =
+      typeof req.query.status === "string" ? req.query.status : undefined;
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
+
+    const result = await listDeletionRequests({
+      status: status as "pending" | "processing" | "completed" | "rejected" | undefined,
+      page,
+      limit,
+    });
+    res.json(result);
+  } catch (error) {
+    console.error("Admin deletion requests list error:", error);
+    res.status(500).json({
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to load deletion requests",
+    });
+  }
+});
+
+router.patch(
+  "/deletion-requests/:id/reject",
+  async (req: Request, res: Response) => {
+    try {
+      const { adminNotes } = req.body as { adminNotes?: string };
+      const request = await updateDeletionRequestStatus(
+        req.params.id,
+        "rejected",
+        adminNotes
+      );
+      res.json({ message: "Deletion request rejected", request });
+    } catch (error) {
+      console.error("Admin reject deletion request error:", error);
+      res.status(400).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to reject deletion request",
+      });
+    }
+  }
+);
+
+router.post(
+  "/deletion-requests/:id/complete",
+  async (req: Request, res: Response) => {
+    try {
+      const { adminNotes } = req.body as { adminNotes?: string };
+      const request = await completeDeletionRequest(req.params.id, adminNotes);
+      res.json({
+        message: "Account and associated data deleted",
+        request,
+      });
+    } catch (error) {
+      console.error("Admin complete deletion request error:", error);
+      res.status(400).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to complete deletion request",
       });
     }
   }

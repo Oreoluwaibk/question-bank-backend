@@ -108,3 +108,62 @@ export async function reactivateAccount(userId: string) {
 
   return { reactivated: true };
 }
+
+export async function deleteAccountPermanently(userId: string) {
+  const { data: attempts, error: attemptsError } = await supabaseAdmin
+    .from("attempts")
+    .select("id")
+    .eq("user_id", userId);
+
+  if (attemptsError) {
+    throw new Error(attemptsError.message);
+  }
+
+  const attemptIds = (attempts ?? []).map((attempt) => attempt.id);
+
+  if (attemptIds.length) {
+    const [{ error: answersError }, { error: statsError }] = await Promise.all([
+      supabaseAdmin.from("attempt_answers").delete().in("attempt_id", attemptIds),
+      supabaseAdmin
+        .from("attempt_question_stats")
+        .delete()
+        .in("attempt_id", attemptIds),
+    ]);
+
+    if (answersError) {
+      throw new Error(answersError.message);
+    }
+    if (statsError) {
+      throw new Error(statsError.message);
+    }
+  }
+
+  const tables = [
+    supabaseAdmin.from("attempts").delete().eq("user_id", userId),
+    supabaseAdmin.from("questions").delete().eq("creator_id", userId),
+    supabaseAdmin.from("materials").delete().eq("user_id", userId),
+    supabaseAdmin.from("subscriptions").delete().eq("user_id", userId),
+    supabaseAdmin.from("user_device_sessions").delete().eq("user_id", userId),
+    supabaseAdmin
+      .from("account_deletion_requests")
+      .delete()
+      .eq("user_id", userId),
+    supabaseAdmin.from("profiles").delete().eq("id", userId),
+  ];
+
+  for (const query of tables) {
+    const { error } = await query;
+    if (error && !/account_deletion_requests/i.test(error.message)) {
+      throw new Error(error.message);
+    }
+  }
+
+  const { error: deleteUserError } =
+    await supabaseAdmin.auth.admin.deleteUser(userId);
+
+  if (deleteUserError) {
+    throw new Error(deleteUserError.message);
+  }
+
+  return { deleted: true };
+}

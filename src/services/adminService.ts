@@ -8,6 +8,7 @@ import {
 import { listUserDevices } from "./deviceSessionService";
 import { isProTier } from "./subscriptionPlans";
 import { reactivateAccount, deactivateAccount } from "./accountService";
+import { countPendingDeletionRequests } from "./deletionRequestService";
 
 type ProfileRow = {
   id: string;
@@ -68,6 +69,7 @@ export async function getPlatformStats() {
     { count: totalQuestions },
     { data: subscriptions },
     recentProfilesResult,
+    pendingDeletionRequests,
   ] = await Promise.all([
     supabaseAdmin
       .from("profiles")
@@ -86,6 +88,7 @@ export async function getPlatformStats() {
       .from("profiles")
       .select("*", { count: "exact", head: true })
       .gte("created_at", sevenDaysAgo.toISOString()),
+    countPendingDeletionRequests(),
   ]);
 
   const proUsers =
@@ -101,6 +104,7 @@ export async function getPlatformStats() {
     totalAttempts: totalAttempts ?? 0,
     totalQuestions: totalQuestions ?? 0,
     signupsLast7Days: recentProfilesResult.count ?? 0,
+    pendingDeletionRequests,
   };
 }
 

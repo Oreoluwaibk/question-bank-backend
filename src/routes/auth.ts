@@ -26,6 +26,7 @@ import {
   recordTermsAcceptance,
   updateUserProfile,
 } from '../services/profileService';
+import { createDeletionRequest } from '../services/deletionRequestService';
 
 const router = Router();
 
@@ -70,6 +71,46 @@ const avatarUpload = multer({
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
+function isDuplicateSignup(user: { identities?: unknown[] } | null | undefined) {
+  return Boolean(
+    user && Array.isArray(user.identities) && user.identities.length === 0
+  );
+}
+
+async function saveRegistrationProfile(
+  userId: string,
+  profile: {
+    firstName: string;
+    lastName: string;
+    phoneNumber: string;
+  }
+) {
+  const acceptedAt = new Date().toISOString();
+  const termsVersion = await getPublishedTermsVersion();
+  const { error } = await supabaseAdmin.from('profiles').upsert(
+    {
+      id: userId,
+      first_name: profile.firstName.trim(),
+      last_name: profile.lastName.trim(),
+      phone_number: profile.phoneNumber.trim(),
+      terms_accepted_at: acceptedAt,
+      terms_accepted_version: termsVersion,
+    },
+    { onConflict: 'id' }
+  );
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
+async function resendSignupOtp(email: string) {
+  return supabasePublic.auth.resend({
+    type: 'signup',
+    email: email.trim(),
+  });
+}
+
 router.post('/signup', async (req, res) => {
   const {
     email,
@@ -110,6 +151,7 @@ router.post('/signup', async (req, res) => {
 })
 .post('/register', async (req: Request, res: Response) => {
   const { email, password, firstName, lastName, phoneNumber, acceptedTerms } = req.body;
+  const normalizedEmail = String(email ?? '').trim();
 
   if (!acceptedTerms) {
     return res.status(400).json({
@@ -118,7 +160,7 @@ router.post('/signup', async (req, res) => {
   }
 
   const validationError = validateRegistrationInput({
-    email,
+    email: normalizedEmail,
     password,
     firstName,
     lastName,
@@ -129,51 +171,146 @@ router.post('/signup', async (req, res) => {
     return res.status(400).json({ error: validationError });
   }
 
+  const profilePayload = {
+    firstName: String(firstName).trim(),
+    lastName: String(lastName).trim(),
+    phoneNumber: String(phoneNumber).trim(),
+  };
+
+  const startedAt = Date.now();
   const { data, error } = await supabasePublic.auth.signUp({
-    email: email.trim(),
+    email: normalizedEmail,
     password,
     options: {
-      emailRedirectTo: undefined // OTP only
-    }
+      data: {
+        first_name: profilePayload.firstName,
+        last_name: profilePayload.lastName,
+        phone_number: profilePayload.phoneNumber,
+      },
+    },
   });
+
+  if (error) {
+    const message = error.message.toLowerCase();
+    if (message.includes('already registered') || message.includes('already exists')) {
+      const { error: resendError } = await resendSignupOtp(normalizedEmail);
+      if (resendError) {
+        return res.status(400).json({
+          error:
+            'An account with this email already exists. Sign in or use forgot password.',
+        });
+      }
+
+      return res.json({
+        message: 'Verification code resent to your email',
+        resent: true,
+      });
+    }
+
+    return res.status(400).json({ error: error.message });
+  }
+
+  const duplicateSignup = isDuplicateSignup(data.user);
+  if (duplicateSignup) {
+    const { error: resendError } = await resendSignupOtp(normalizedEmail);
+    if (resendError) {
+      return res.status(400).json({
+        error:
+          'An account with this email already exists. Sign in or use forgot password.',
+      });
+    }
+
+    console.log(
+      `[auth/register] Existing unverified account, resent OTP in ${Date.now() - startedAt}ms`
+    );
+
+    return res.json({
+      message: 'Verification code resent to your email',
+      resent: true,
+    });
+  }
+
+  if (data.session?.access_token && data.user?.id) {
+    void saveRegistrationProfile(data.user.id, profilePayload).catch((err) => {
+      console.error('Failed to save profile on register:', err);
+    });
+    void provisionFreeSubscription(data.user.id).catch((err) => {
+      console.error('Failed to provision subscription on register:', err);
+    });
+
+    console.log(
+      `[auth/register] Auto-confirmed signup in ${Date.now() - startedAt}ms`
+    );
+
+    return res.json({
+      message: 'Account created',
+      userId: data.user.id,
+      autoConfirmed: true,
+      accessToken: data.session.access_token,
+      refreshToken: data.session.refresh_token,
+    });
+  }
+
+  if (data.user?.id) {
+    void saveRegistrationProfile(data.user.id, profilePayload).catch((err) => {
+      console.error('Failed to save profile on register:', err);
+    });
+  }
+
+  console.log(
+    `[auth/register] Signup complete, OTP requested in ${Date.now() - startedAt}ms`,
+    {
+      userId: data.user?.id ?? null,
+      identities: data.user?.identities?.length ?? 0,
+    }
+  );
+
+  res.json({
+    message: 'Verification code sent to your email',
+    userId: data.user?.id,
+  });
+})
+.post('/resend-otp', async (req: Request, res: Response) => {
+  const { email } = req.body as { email?: string };
+  const normalizedEmail = email?.trim();
+
+  if (!normalizedEmail) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  const { error } = await resendSignupOtp(normalizedEmail);
 
   if (error) {
     return res.status(400).json({ error: error.message });
   }
 
-  if (data.user?.id) {
-    const acceptedAt = new Date().toISOString();
-    const termsVersion = await getPublishedTermsVersion();
-    const { error: profileError } = await supabaseAdmin.from('profiles').upsert(
-      {
-        id: data.user.id,
-        first_name: firstName.trim(),
-        last_name: lastName.trim(),
-        phone_number: phoneNumber.trim(),
-        terms_accepted_at: acceptedAt,
-        terms_accepted_version: termsVersion,
-      },
-      { onConflict: 'id' }
-    );
-
-    if (profileError) {
-      console.error('Failed to save profile on register:', profileError);
-    }
-  }
-
-  res.json({
-    message: 'OTP sent to email',
-    userId: data.user?.id
-  });
+  res.json({ message: 'Verification code resent to your email' });
 })
 .post('/verify-otp', async (req: Request, res: Response) => {
   const { email, otp, deviceId, deviceName } = req.body;
+  const normalizedEmail = String(email ?? '').trim();
+  const token = String(otp ?? '').trim();
 
-  const { data, error } = await supabasePublic.auth.verifyOtp({
-    email,
-    token: otp,
-    type: 'email'
-  });
+  if (!normalizedEmail || !token) {
+    return res.status(400).json({ error: 'Email and verification code are required' });
+  }
+
+  let data;
+  let error;
+
+  ({ data, error } = await supabasePublic.auth.verifyOtp({
+    email: normalizedEmail,
+    token,
+    type: 'signup',
+  }));
+
+  if (error) {
+    ({ data, error } = await supabasePublic.auth.verifyOtp({
+      email: normalizedEmail,
+      token,
+      type: 'email',
+    }));
+  }
 
   if (error) {
     return res.status(400).json({ error: error.message });
@@ -306,6 +443,37 @@ router.post('/signup', async (req, res) => {
   } catch (err) {
     res.status(400).json({
       error: err instanceof Error ? err.message : 'Could not log out device',
+    });
+  }
+})
+.post('/request-deletion', requireAuthOnly, async (req: Request, res: Response) => {
+  const userId = req.user?.id;
+  const email = req.user?.email;
+  const { reason } = req.body as { reason?: string };
+
+  if (!userId || !email) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const { request, alreadyPending } = await createDeletionRequest({
+      email,
+      userId,
+      reason,
+      source: 'app',
+    });
+
+    res.json({
+      message: alreadyPending
+        ? 'Your deletion request is already pending review.'
+        : 'Deletion request submitted. We will permanently delete your account and data within 30 days.',
+      requestId: request.id,
+      alreadyPending,
+    });
+  } catch (err) {
+    res.status(400).json({
+      error:
+        err instanceof Error ? err.message : 'Could not submit deletion request',
     });
   }
 })

@@ -7,11 +7,13 @@ import analyticsRouter from "./analytics";
 import subscriptionRouter from "./subscription";
 import adminRouter from "./admin";
 import legalRouter from "./legal";
+import accountDeletionRouter from "./accountDeletion";
 
 const router = Router();
 
 router.use("/auth", authRouter);
 router.use("/legal", legalRouter);
+router.use("/account-deletion", accountDeletionRouter);
 router.use("/admin", adminRouter);
 router.use("/upload", uploadRouter);
 router.use("/attempts", attemptRouter);
