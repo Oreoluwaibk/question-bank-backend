@@ -3,6 +3,11 @@ import { requireAuth } from "../middlewares/auth";
 import { supabaseAdmin } from "../services/supabaseAdmin";
 import { requireTestStartPermission } from "../services/subscriptionService";
 import { subscriptionErrorResponse } from "../lib/subscriptionErrors";
+import {
+  calculateMaxScore,
+  gradeQuestion,
+  questionMaxPoints,
+} from "../lib/grading";
 import type { QuestionType } from "../types/question.types";
 
 const router = Router();
@@ -26,48 +31,6 @@ function getSelectedQuestionIds(
     return null;
   }
   return meta.questionIds;
-}
-
-function questionMaxPoints(question: { type: string; answer?: unknown }): number {
-  if (["FILL_IN_THE_BLANK", "MATCHING"].includes(question.type)) {
-    return Array.isArray(question.answer) ? question.answer.length : 1;
-  }
-  return 1;
-}
-
-function calculateMaxScore(questions: { type: string; answer?: unknown }[]): number {
-  return questions.reduce((sum, q) => sum + questionMaxPoints(q), 0);
-}
-
-function gradeQuestion(question: any, userAnswer: any): number {
-  if (!question) return 0;
-
-  switch (question.type) {
-    case "MCQ":
-    case "TRUE_FALSE":
-      return question.answer === userAnswer ? 1 : 0;
-
-    case "FILL_IN_THE_BLANK":
-      if (!Array.isArray(question.answer) || !Array.isArray(userAnswer)) return 0;
-      return question.answer.reduce(
-        (score: number, ans: string, i: number) =>
-          userAnswer[i]?.toLowerCase() === ans.toLowerCase() ? score + 1 : score,
-        0
-      );
-
-    case "MATCHING":
-      if (!Array.isArray(question.answer) || !Array.isArray(userAnswer)) return 0;
-      return question.answer.reduce(
-        (score: number, pair: any, i: number) =>
-          userAnswer[i]?.left === pair.left && userAnswer[i]?.right === pair.right
-            ? score + 1
-            : score,
-        0
-      );
-
-    default:
-      return 0;
-  }
 }
 
 async function loadQuestionsForAttempt(attempt: any, userId: string) {
@@ -980,10 +943,8 @@ router
       const userAnswer =
         saved?.user_answer ?? userAnswers[question.id] ?? null;
       const qMax = questionMaxPoints(question);
-      const qScore =
-        saved?.score ?? gradeQuestion(question, userAnswer);
-      const isCorrect =
-        saved?.is_correct ?? (qScore >= qMax && qMax > 0);
+      const qScore = gradeQuestion(question, userAnswer);
+      const isCorrect = qMax > 0 && qScore >= qMax;
 
       return {
         question,
@@ -996,6 +957,10 @@ router
     });
 
     const missed = results.filter((row) => !row.isCorrect);
+    const recomputedScore = results.reduce((sum, row) => sum + row.score, 0);
+    const maxScore = attempt.max_score ?? calculateMaxScore(questions);
+    const recomputedAccuracy =
+      maxScore > 0 ? Number((recomputedScore / maxScore).toFixed(2)) : 0;
 
     res.json({
       attempt,
@@ -1004,9 +969,9 @@ router
       results,
       missed,
       summary: {
-        score: attempt.score ?? results.reduce((sum, r) => sum + r.score, 0),
-        maxScore: attempt.max_score ?? calculateMaxScore(questions),
-        accuracy: attempt.accuracy,
+        score: recomputedScore,
+        maxScore,
+        accuracy: recomputedAccuracy,
         timeUsedSeconds: attempt.time_used_seconds
       }
     });
