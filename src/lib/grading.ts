@@ -106,10 +106,17 @@ export function gradeQuestion(
     case "MATCHING":
       if (!Array.isArray(question.answer) || !Array.isArray(userAnswer)) return 0;
       return question.answer.reduce(
-        (score: number, pair: { left: string; right: string }, i: number) =>
-          userAnswer[i]?.left === pair.left && userAnswer[i]?.right === pair.right
-            ? score + 1
-            : score,
+        (score: number, pair: { left: string; right: string }, i: number) => {
+          const submitted = userAnswer[i];
+          if (!submitted || typeof submitted !== "object") return score;
+
+          const leftMatch =
+            normalizeText(submitted.left) === normalizeText(pair.left);
+          const rightMatch =
+            normalizeText(submitted.right) === normalizeText(pair.right);
+
+          return leftMatch && rightMatch ? score + 1 : score;
+        },
         0
       );
 
