@@ -8,10 +8,12 @@ import subscriptionRouter from "./subscription";
 import adminRouter from "./admin";
 import legalRouter from "./legal";
 import accountDeletionRouter from "./accountDeletion";
+import versionRouter from "./version";
 
 const router = Router();
 
 router.use("/auth", authRouter);
+router.use("/version", versionRouter);
 router.use("/legal", legalRouter);
 router.use("/account-deletion", accountDeletionRouter);
 router.use("/admin", adminRouter);

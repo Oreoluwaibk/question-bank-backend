@@ -25,6 +25,11 @@ import {
   listDeletionRequests,
   updateDeletionRequestStatus,
 } from "../services/deletionRequestService";
+import {
+  getAppVersionConfig,
+  updateAppVersionConfig,
+  type UpdateAppVersionConfigInput,
+} from "../services/appVersionService";
 
 const router = Router();
 
@@ -39,6 +44,41 @@ router.get("/legal", async (_req: Request, res: Response) => {
     res.status(500).json({
       error:
         error instanceof Error ? error.message : "Failed to load legal documents",
+    });
+  }
+});
+
+router.get("/app-version", async (_req: Request, res: Response) => {
+  try {
+    const config = await getAppVersionConfig();
+    res.json({ config });
+  } catch (error) {
+    console.error("Admin app version fetch error:", error);
+    res.status(500).json({
+      error:
+        error instanceof Error ? error.message : "Failed to load app version",
+    });
+  }
+});
+
+router.put("/app-version", async (req: Request, res: Response) => {
+  const body = req.body as UpdateAppVersionConfigInput;
+
+  try {
+    const config = await updateAppVersionConfig({
+      latestVersion: body.latestVersion,
+      minVersion: body.minVersion,
+      forceUpdate: Boolean(body.forceUpdate),
+      updateMessage: body.updateMessage,
+      iosStoreUrl: body.iosStoreUrl,
+      androidStoreUrl: body.androidStoreUrl,
+    });
+    res.json({ message: "App version published", config });
+  } catch (error) {
+    console.error("Admin app version update error:", error);
+    res.status(400).json({
+      error:
+        error instanceof Error ? error.message : "Failed to update app version",
     });
   }
 });
