@@ -13,7 +13,6 @@ import {
   createPaystackCustomer,
   formatPaystackAmount,
   getOrCreatePaystackPlanCode,
-  initializePaystackTransaction,
   paystackAmountMajor,
   PAYSTACK_CURRENCY,
   PAYSTACK_PRO_AMOUNT,
@@ -24,7 +23,6 @@ import {
 import { FREE_PLAN, PRO_PLAN } from "../services/subscriptionPlans";
 
 const router = Router();
-const APP_SCHEME = process.env.APP_SCHEME ?? "questionapp";
 
 async function getUserEmail(userId: string) {
   const { data, error } = await supabaseAdmin.auth.admin.getUserById(userId);
@@ -116,20 +114,15 @@ router.post("/checkout", requireAuth, async (req: Request, res: Response) => {
     }
 
     const email = await getUserEmail(userId);
-    const customerCode = await resolvePaystackCustomer(userId, email);
+    // Ensure Paystack customer + plan exist, but do NOT initialize a transaction here.
+    // The mobile app opens Inline checkout with this reference; pre-initializing the
+    // same reference makes Paystack reject it and the payment modal closes instantly.
+    await resolvePaystackCustomer(userId, email);
     const planCode = await getOrCreatePaystackPlanCode();
-
-    const initialized = await initializePaystackTransaction({
-      email,
-      userId,
-      customerCode,
-      planCode,
-      callbackUrl: `${APP_SCHEME}://subscription/success`,
-    });
+    const reference = `qb_${userId.replace(/-/g, "").slice(0, 12)}_${Date.now()}`;
 
     res.json({
-      reference: initialized.reference,
-      accessCode: initialized.access_code,
+      reference,
       publicKey: PAYSTACK_PUBLIC_KEY,
       email,
       amount: paystackAmountMajor(),
