@@ -134,7 +134,7 @@ export async function initializePaystackTransaction(payload: {
   userId: string;
   callbackUrl: string;
   planCode: string;
-  customerCode?: string;
+  reference: string;
 }) {
   return paystackRequest<PaystackInitializeData>("/transaction/initialize", {
     method: "POST",
@@ -143,8 +143,8 @@ export async function initializePaystackTransaction(payload: {
       amount: String(PAYSTACK_PRO_AMOUNT),
       currency: PAYSTACK_CURRENCY,
       plan: payload.planCode,
+      reference: payload.reference,
       callback_url: payload.callbackUrl,
-      customer: payload.customerCode,
       metadata: {
         user_id: payload.userId,
       },
