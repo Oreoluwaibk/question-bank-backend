@@ -230,7 +230,7 @@ export async function initializePaystackTransaction(payload: {
 
 function paystackErrorNamesChannel(message: string, channel: string) {
   const text = message.toLowerCase();
-  return text.includes(channel) || text.includes(channel.replaceAll("_", " "));
+  return text.includes(channel) || text.includes(channel.split("_").join(" "));
 }
 
 export async function verifyPaystackTransaction(reference: string) {

@@ -52,41 +52,39 @@ export async function registerDeviceSession(
     throw new Error(existingError.message);
   }
 
-  if (existing) {
-    const { error } = await supabaseAdmin
-      .from("user_device_sessions")
-      .update({
-        device_name: options?.deviceName ?? null,
-        refresh_token_hash: refreshTokenHash,
-        last_active_at: new Date().toISOString(),
-      })
-      .eq("id", existing.id);
-
-    if (error) {
-      throw new Error(error.message);
+  if (!existing) {
+    const deviceCount = await countUserDevices(userId);
+    if (deviceCount >= MAX_DEVICES_PER_USER) {
+      throw new DeviceLimitError();
     }
-
-    return { registered: true, updated: true };
   }
 
-  const deviceCount = await countUserDevices(userId);
-  if (deviceCount >= MAX_DEVICES_PER_USER) {
-    throw new DeviceLimitError();
-  }
-
-  const { error } = await supabaseAdmin.from("user_device_sessions").insert({
-    user_id: userId,
-    device_id: normalizedDeviceId,
-    device_name: options?.deviceName ?? null,
-    refresh_token_hash: refreshTokenHash,
-    last_active_at: new Date().toISOString(),
-  });
+  const { error } = await supabaseAdmin.from("user_device_sessions").upsert(
+    {
+      user_id: userId,
+      device_id: normalizedDeviceId,
+      device_name: options?.deviceName ?? null,
+      refresh_token_hash: refreshTokenHash,
+      last_active_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id,device_id" }
+  );
 
   if (error) {
+    if (isDuplicateDeviceSession(error)) {
+      return { registered: true, updated: true };
+    }
     throw new Error(error.message);
   }
 
-  return { registered: true, updated: false };
+  return { registered: true, updated: Boolean(existing) };
+}
+
+function isDuplicateDeviceSession(error: { code?: string; message?: string }) {
+  return (
+    error.code === "23505" ||
+    /user_device_sessions_user_id_device_id_key/i.test(error.message ?? "")
+  );
 }
 
 export async function removeDeviceSession(userId: string, deviceId: string) {
