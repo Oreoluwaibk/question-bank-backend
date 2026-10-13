@@ -96,6 +96,30 @@ async function activateProFromVerification(
   );
 }
 
+function webCheckoutCallback(req: Request): string | null {
+  const requested = req.body?.callbackUrl;
+  if (typeof requested !== "string" || !requested.trim()) return null;
+
+  let url: URL;
+  try {
+    url = new URL(requested);
+  } catch {
+    return null;
+  }
+
+  const origin = req.get("origin");
+  if (!origin || url.origin !== origin) return null;
+  if (url.pathname !== "/subscription/success") return null;
+
+  const local =
+    url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  if (url.protocol === "https:" || (url.protocol === "http:" && local)) {
+    return url.toString();
+  }
+
+  return null;
+}
+
 function pricingPayload(interval: BillingInterval) {
   const amount = amountForInterval(interval);
   return {
@@ -162,7 +186,8 @@ router.post("/checkout", requireAuth, async (req: Request, res: Response) => {
       reference,
       interval,
       amountKobo,
-      callbackUrl: `${APP_SCHEME}://subscription/success`,
+      callbackUrl:
+        webCheckoutCallback(req) ?? `${APP_SCHEME}://subscription/success`,
     });
 
     res.json({

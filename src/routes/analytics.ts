@@ -153,6 +153,23 @@ router
   res.json(data);
 })
 .get('/leaderboard', requireAuth, async (req, res) => {
+  const rawLimit = Number(req.query.limit);
+  const rawOffset = Number(req.query.offset);
+  const limit = Math.min(
+    Math.max(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 10, 1),
+    50
+  );
+  const offset = Math.max(Number.isFinite(rawOffset) ? rawOffset : 0, 0);
+
+  const emptyPage = {
+    entries: [],
+    total: 0,
+    limit,
+    offset,
+    hasMore: false,
+    currentUser: null,
+  };
+
   const { data: attempts, error } = await supabaseAdmin
     .from('attempts')
     .select('user_id, score, accuracy')
@@ -185,7 +202,7 @@ router
 
   const userIds = [...stats.keys()];
   if (userIds.length === 0) {
-    return res.json([]);
+    return res.json(emptyPage);
   }
 
   const { data: profiles } = await supabaseAdmin
@@ -195,7 +212,7 @@ router
 
   const profileMap = new Map((profiles ?? []).map((p) => [p.id, p]));
 
-  const leaderboard = userIds
+  const ranked = userIds
     .map((userId) => {
       const userStats = stats.get(userId)!;
       const profile = profileMap.get(userId);
@@ -219,10 +236,18 @@ router
       (a, b) =>
         b.bestScore - a.bestScore || b.averageAccuracy - a.averageAccuracy
     )
-    .slice(0, 20)
     .map((entry, index) => ({ rank: index + 1, ...entry }));
 
-  res.json(leaderboard);
+  const entries = ranked.slice(offset, offset + limit);
+
+  res.json({
+    entries,
+    total: ranked.length,
+    limit,
+    offset,
+    hasMore: offset + entries.length < ranked.length,
+    currentUser: ranked.find((entry) => entry.isCurrentUser) ?? null,
+  });
 })
 .get('/retakes', requireAuth, async (req, res) => {
   const { materialTitle, type } = req.query;
