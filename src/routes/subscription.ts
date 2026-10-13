@@ -8,6 +8,7 @@ import {
   getSubscriptionStatus,
 } from "../services/subscriptionService";
 import {
+  amountForInterval,
   disablePaystackSubscription,
   fetchPaystackSubscription,
   createPaystackCustomer,
@@ -16,12 +17,16 @@ import {
   initializePaystackTransaction,
   paystackAmountMajor,
   PAYSTACK_CURRENCY,
-  PAYSTACK_PRO_AMOUNT,
   PAYSTACK_PUBLIC_KEY,
   verifyPaystackSignature,
   verifyPaystackTransaction,
 } from "../services/paystack";
-import { FREE_PLAN, PRO_PLAN } from "../services/subscriptionPlans";
+import {
+  FREE_PLAN,
+  PRO_PLAN,
+  resolveBillingInterval,
+  type BillingInterval,
+} from "../services/subscriptionPlans";
 
 const router = Router();
 const APP_SCHEME = process.env.APP_SCHEME ?? "questionapp";
@@ -61,9 +66,22 @@ async function activateProFromVerification(
   userId: string,
   verification: Awaited<ReturnType<typeof verifyPaystackTransaction>>
 ) {
-  const customerCode = verification.customer?.customer_code ?? "unknown";
+  const existing = await getOrCreateSubscription(userId);
+  const customerCode =
+    verification.customer?.customer_code ??
+    existing.stripe_customer_id ??
+    "unknown";
+
+  // Prefer a real Paystack subscription code when Paystack includes it.
+  // Otherwise keep an existing SUB_ code, then fall back to the payment
+  // reference (still grants Pro locally).
   const subscriptionCode =
-    verification.subscription?.subscription_code ?? verification.reference;
+    verification.subscription?.subscription_code ??
+    (existing.stripe_subscription_id?.startsWith("SUB_")
+      ? existing.stripe_subscription_id
+      : null) ??
+    verification.reference;
+
   const status = verification.subscription?.status ?? "active";
   const nextPayment = verification.subscription?.next_payment_date
     ? new Date(verification.subscription.next_payment_date)
@@ -78,21 +96,30 @@ async function activateProFromVerification(
   );
 }
 
+function pricingPayload(interval: BillingInterval) {
+  const amount = amountForInterval(interval);
+  return {
+    interval,
+    amount,
+    currency: PAYSTACK_CURRENCY,
+    displayAmount: formatPaystackAmount(amount, PAYSTACK_CURRENCY),
+  };
+}
+
 router.get("/me", requireAuth, async (req: Request, res: Response) => {
   try {
     const status = await getSubscriptionStatus(req.user!.id);
+    const monthly = pricingPayload("monthly");
+    const yearly = pricingPayload("yearly");
+
     res.json({
       ...status,
       publishableKey: PAYSTACK_PUBLIC_KEY,
       provider: "paystack",
-      pricing: {
-        amount: PAYSTACK_PRO_AMOUNT,
-        currency: PAYSTACK_CURRENCY,
-        displayAmount: formatPaystackAmount(
-          PAYSTACK_PRO_AMOUNT,
-          PAYSTACK_CURRENCY
-        ),
-        interval: "monthly",
+      pricing: monthly,
+      pricingOptions: {
+        monthly,
+        yearly,
       },
       plans: {
         free: FREE_PLAN,
@@ -115,10 +142,16 @@ router.post("/checkout", requireAuth, async (req: Request, res: Response) => {
       return res.status(400).json({ error: "You already have an active subscription" });
     }
 
+    const interval =
+      resolveBillingInterval(req.body?.interval) ?? ("monthly" as BillingInterval);
+
     const email = await getUserEmail(userId);
     await resolvePaystackCustomer(userId, email);
-    const planCode = await getOrCreatePaystackPlanCode();
-    const reference = `qb_${userId.replace(/-/g, "").slice(0, 12)}_${Date.now()}`;
+    const planCode = await getOrCreatePaystackPlanCode(interval);
+    const amountKobo = amountForInterval(interval);
+    const reference = `qb_${interval[0]}_${userId
+      .replace(/-/g, "")
+      .slice(0, 10)}_${Date.now()}`;
 
     // Initialize on Paystack and return the hosted checkout URL. Mobile opens
     // this in the system browser — Inline WebView popups close unreliably.
@@ -127,6 +160,8 @@ router.post("/checkout", requireAuth, async (req: Request, res: Response) => {
       userId,
       planCode,
       reference,
+      interval,
+      amountKobo,
       callbackUrl: `${APP_SCHEME}://subscription/success`,
     });
 
@@ -136,9 +171,10 @@ router.post("/checkout", requireAuth, async (req: Request, res: Response) => {
       accessCode: initialized.access_code,
       publicKey: PAYSTACK_PUBLIC_KEY,
       email,
-      amount: paystackAmountMajor(),
+      amount: paystackAmountMajor(amountKobo),
       currency: PAYSTACK_CURRENCY,
       planCode,
+      interval,
     });
   } catch (err) {
     res.status(500).json({
@@ -159,7 +195,10 @@ router.post("/cancel", requireAuth, async (req: Request, res: Response) => {
     const subscription = await getOrCreateSubscription(userId);
     const paystackCode = subscription.stripe_subscription_id;
 
-    if (paystackCode) {
+    // Only call Paystack disable for real subscription codes (SUB_...).
+    // Older activations sometimes stored a transaction reference (qb_...),
+    // which cannot be disabled via the subscription API.
+    if (paystackCode && !paystackCode.startsWith("admin-")) {
       try {
         const paystackSub = await fetchPaystackSubscription(paystackCode);
         if (paystackSub.email_token) {
@@ -177,7 +216,7 @@ router.post("/cancel", requireAuth, async (req: Request, res: Response) => {
 
     const updated = await getSubscriptionStatus(userId);
     res.json({
-      message: "Subscription cancelled. You are now on the free plan.",
+      message: "Subscription cancelled. You are now on the free trial.",
       ...updated,
     });
   } catch (err) {

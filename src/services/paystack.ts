@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import type { BillingInterval } from "./subscriptionPlans";
 
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
 
@@ -12,18 +13,36 @@ if (!secretKey) {
 }
 
 export const PAYSTACK_CURRENCY = process.env.PAYSTACK_CURRENCY ?? "NGN";
-export const PAYSTACK_PRO_AMOUNT = resolveProAmountKobo();
 
-function resolveProAmountKobo(): number {
-  const raw = Number(process.env.PAYSTACK_PRO_AMOUNT ?? "500000");
-  if (!Number.isFinite(raw) || raw <= 0) return 500000;
-  // Treat small values as major units (5000 -> ₦5,000 = 500000 kobo).
+function resolveAmountKobo(envValue: string | undefined, fallbackMajor: number) {
+  const raw = Number(envValue ?? String(fallbackMajor));
+  if (!Number.isFinite(raw) || raw <= 0) return fallbackMajor * 100;
+  // Treat small values as major units (5500 -> ₦5,500 = 550000 kobo).
   if (raw < 10000) return Math.round(raw * 100);
   return Math.round(raw);
 }
 
-export function paystackAmountMajor(amountKobo = PAYSTACK_PRO_AMOUNT) {
+/** Monthly Pro price in kobo. Default ₦5,500. */
+export const PAYSTACK_MONTHLY_AMOUNT = resolveAmountKobo(
+  process.env.PAYSTACK_MONTHLY_AMOUNT ?? process.env.PAYSTACK_PRO_AMOUNT,
+  5500
+);
+
+/** Yearly Pro price in kobo. Default ₦55,000 (~10 months). */
+export const PAYSTACK_YEARLY_AMOUNT = resolveAmountKobo(
+  process.env.PAYSTACK_YEARLY_AMOUNT,
+  55000
+);
+
+/** @deprecated Prefer PAYSTACK_MONTHLY_AMOUNT */
+export const PAYSTACK_PRO_AMOUNT = PAYSTACK_MONTHLY_AMOUNT;
+
+export function paystackAmountMajor(amountKobo: number) {
   return Math.round(amountKobo / 100);
+}
+
+export function amountForInterval(interval: BillingInterval) {
+  return interval === "yearly" ? PAYSTACK_YEARLY_AMOUNT : PAYSTACK_MONTHLY_AMOUNT;
 }
 
 type PaystackResponse<T> = {
@@ -83,26 +102,38 @@ export function verifyPaystackSignature(
   return hash === signatureHeader;
 }
 
-let cachedPlanCode: string | null = process.env.PAYSTACK_PLAN_CODE ?? null;
+const cachedPlanCodes: Partial<Record<BillingInterval, string>> = {
+  monthly:
+    process.env.PAYSTACK_PLAN_CODE_MONTHLY ??
+    process.env.PAYSTACK_PLAN_CODE ??
+    undefined,
+  yearly: process.env.PAYSTACK_PLAN_CODE_YEARLY ?? undefined,
+};
 
-export async function getOrCreatePaystackPlanCode() {
-  if (cachedPlanCode) {
-    return cachedPlanCode;
-  }
+export async function getOrCreatePaystackPlanCode(interval: BillingInterval) {
+  const cached = cachedPlanCodes[interval];
+  if (cached) return cached;
 
+  const amount = amountForInterval(interval);
+  // Paystack uses "annually" (not "yearly") for yearly plans.
+  const paystackInterval = interval === "yearly" ? "annually" : "monthly";
   const plan = await paystackRequest<{ plan_code: string }>("/plan", {
     method: "POST",
     body: JSON.stringify({
-      name: "Question Bank Pro",
-      interval: "monthly",
-      amount: PAYSTACK_PRO_AMOUNT,
+      name:
+        interval === "yearly"
+          ? "Question Bank Pro (Yearly)"
+          : "Question Bank Pro (Monthly)",
+      interval: paystackInterval,
+      amount,
       currency: PAYSTACK_CURRENCY,
-      description: "Unlimited materials, attempts, timed tests, and retakes",
+      description:
+        "Unlimited materials, attempts, timed tests, retakes, copy and export",
     }),
   });
 
-  cachedPlanCode = plan.plan_code;
-  return cachedPlanCode;
+  cachedPlanCodes[interval] = plan.plan_code;
+  return plan.plan_code;
 }
 
 export type PaystackInitializeData = {
@@ -135,18 +166,21 @@ export async function initializePaystackTransaction(payload: {
   callbackUrl: string;
   planCode: string;
   reference: string;
+  interval: BillingInterval;
+  amountKobo: number;
 }) {
   return paystackRequest<PaystackInitializeData>("/transaction/initialize", {
     method: "POST",
     body: JSON.stringify({
       email: payload.email,
-      amount: String(PAYSTACK_PRO_AMOUNT),
+      amount: String(payload.amountKobo),
       currency: PAYSTACK_CURRENCY,
       plan: payload.planCode,
       reference: payload.reference,
       callback_url: payload.callbackUrl,
       metadata: {
         user_id: payload.userId,
+        billing_interval: payload.interval,
       },
     }),
   });

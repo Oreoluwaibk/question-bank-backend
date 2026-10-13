@@ -319,18 +319,25 @@ router
       materialTitle,
       materialId,
       questionCount = 20,
-      durationMinutes = 30,
+      durationMinutes,
+      timed,
       questionType
     } = req.body as {
       materialTitle?: string;
       materialId?: string;
       questionCount?: number;
-      durationMinutes?: number;
+      durationMinutes?: number | null;
+      timed?: boolean;
       questionType?: QuestionType;
     };
 
     const count = Number(questionCount);
-    const duration = Number(durationMinutes);
+    const isTimed =
+      timed === true ||
+      (timed !== false &&
+        durationMinutes != null &&
+        [30, 45, 60].includes(Number(durationMinutes)));
+    const duration = isTimed ? Number(durationMinutes ?? 30) : null;
 
     if (!materialTitle && !materialId) {
       return res.status(400).json({
@@ -344,9 +351,9 @@ router
       });
     }
 
-    if (![30, 45, 60].includes(duration)) {
+    if (isTimed && ![30, 45, 60].includes(duration!)) {
       return res.status(400).json({
-        error: "durationMinutes must be 30, 45, or 60"
+        error: "durationMinutes must be 30, 45, or 60 for timed tests"
       });
     }
 
@@ -383,7 +390,7 @@ router
         materialId: resolvedMaterialId,
         materialTitle: resolvedTitle,
         questionType: questionType ?? null,
-        isTimed: true,
+        isTimed,
       });
     } catch (err) {
       const response = subscriptionErrorResponse(res, err);
@@ -420,8 +427,11 @@ router
       Math.min(count, allQuestions.length)
     );
     const selectedIds = selectedQuestions.map((q) => q.id);
-    const durationSeconds = duration * 60;
-    const expiresAt = new Date(Date.now() + durationSeconds * 1000).toISOString();
+    const durationSeconds = isTimed && duration ? duration * 60 : null;
+    const expiresAt =
+      durationSeconds != null
+        ? new Date(Date.now() + durationSeconds * 1000).toISOString()
+        : null;
     const maxScore = calculateMaxScore(selectedQuestions);
 
     const { data: attempt, error } = await supabaseAdmin
@@ -432,7 +442,7 @@ router
         material_title: resolvedTitle,
         question_type: questionType ?? null,
         max_score: maxScore,
-        is_timed: true,
+        is_timed: isTimed,
         duration_seconds: durationSeconds,
         expires_at: expiresAt,
         answers: {
@@ -449,7 +459,12 @@ router
     res.status(201).json({
       attempt,
       questions: selectedQuestions,
-      timing: { expiresAt, durationSeconds, durationMinutes: duration }
+      timing: {
+        expiresAt,
+        durationSeconds,
+        durationMinutes: duration,
+        isTimed,
+      }
     });
   })
   .post("/start", requireAuth, async (req, res) => {

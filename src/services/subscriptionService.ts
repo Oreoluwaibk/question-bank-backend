@@ -15,19 +15,39 @@ type SubscriptionRow = SubscriptionPlan & {
 };
 
 export async function provisionFreeSubscription(userId: string) {
+  // Never overwrite an existing row — login / session register used to upsert
+  // FREE_PLAN and could wipe active Pro subscribers back to free.
+  const { data: existing, error: existingError } = await supabaseAdmin
+    .from("subscriptions")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (existingError) {
+    throw new Error(existingError.message);
+  }
+
+  if (existing) {
+    return existing as SubscriptionRow;
+  }
+
   const { data, error } = await supabaseAdmin
     .from("subscriptions")
-    .upsert(
-      {
-        user_id: userId,
-        ...FREE_PLAN,
-      },
-      { onConflict: "user_id" }
-    )
+    .insert({
+      user_id: userId,
+      ...FREE_PLAN,
+    })
     .select("*")
     .single();
 
   if (error) {
+    // Race: another request inserted first — return that row.
+    const { data: raced } = await supabaseAdmin
+      .from("subscriptions")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (raced) return raced as SubscriptionRow;
     throw new Error(error.message);
   }
 
@@ -86,6 +106,7 @@ export async function getSubscriptionStatus(userId: string) {
   return {
     tier: subscription.tier,
     isPro: pro,
+    isTrialing: !pro,
     canAddMaterials: pro || usage.materials < plan.material_limit,
     canAppendToMaterials: pro,
     canExportQuestions: pro,
@@ -159,7 +180,7 @@ export async function requireMaterialUploadPermission(
 
   if (status.limits.materialsReached) {
     const error = new Error(
-      "Free plan includes 1 document upload. Subscribe to Pro for unlimited uploads."
+      "Free trial includes 2 document uploads. Subscribe to Pro for unlimited uploads."
     );
     (error as Error & { code: string }).code = "SUBSCRIPTION_REQUIRED";
     throw error;
@@ -178,10 +199,12 @@ export async function requireTestStartPermission(
   }
 ) {
   const status = await getSubscriptionStatus(userId);
-  const isTimed = options?.isTimed !== false;
+  const isTimed = Boolean(options?.isTimed);
 
   if (isTimed && !status.allowTimed) {
-    const error = new Error("Timed tests are a Pro feature.");
+    const error = new Error(
+      "Timed tests are a Pro feature. Start an untimed practice test on the free trial, or subscribe to Pro."
+    );
     (error as Error & { code: string }).code = "SUBSCRIPTION_REQUIRED";
     throw error;
   }
@@ -190,13 +213,14 @@ export async function requireTestStartPermission(
     const error = new Error(
       status.isPro
         ? "Attempt limit reached for your subscription."
-        : "Free plan includes 2 practice tests. Subscribe to Pro for unlimited tests and retakes."
+        : "Free trial includes 2 practice tests. Subscribe to Pro for unlimited tests, timed mode, and retakes."
     );
     (error as Error & { code: string }).code = "SUBSCRIPTION_REQUIRED";
     throw error;
   }
 
-  if (status.isPro && !status.allowReattempt) {
+  // Retakes are a Pro feature for everyone on free trial.
+  if (!status.allowReattempt) {
     let query = supabaseAdmin
       .from("attempts")
       .select("*", { count: "exact", head: true })
@@ -219,7 +243,9 @@ export async function requireTestStartPermission(
     const { count: materialAttempts } = await query;
 
     if (materialAttempts && materialAttempts > 0) {
-      const error = new Error("Retakes are not allowed on your plan.");
+      const error = new Error(
+        "Retakes require Pro. Subscribe to practice the same material again."
+      );
       (error as Error & { code: string }).code = "SUBSCRIPTION_REQUIRED";
       throw error;
     }
