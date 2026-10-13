@@ -137,6 +137,25 @@ export async function getOrCreatePaystackPlanCode(interval: BillingInterval) {
   return plan.plan_code;
 }
 
+/**
+ * Every Paystack Checkout method, card first so the page opens on a choice.
+ * Methods the account has not enabled are removed if Paystack rejects them.
+ */
+const PAYSTACK_CHECKOUT_CHANNELS = [
+  "card",
+  "bank",
+  "ussd",
+  "qr",
+  "bank_transfer",
+  "mobile_money",
+  "apple_pay",
+  "eft",
+  "payattitude",
+  "capitec_pay",
+];
+
+let acceptedCheckoutChannels: string[] | null = null;
+
 export type PaystackInitializeData = {
   authorization_url: string;
   access_code: string;
@@ -170,21 +189,48 @@ export async function initializePaystackTransaction(payload: {
   interval: BillingInterval;
   amountKobo: number;
 }) {
-  return paystackRequest<PaystackInitializeData>("/transaction/initialize", {
-    method: "POST",
-    body: JSON.stringify({
-      email: payload.email,
-      amount: String(payload.amountKobo),
-      currency: PAYSTACK_CURRENCY,
-      plan: payload.planCode,
-      reference: payload.reference,
-      callback_url: payload.callbackUrl,
-      metadata: {
-        user_id: payload.userId,
-        billing_interval: payload.interval,
-      },
-    }),
-  });
+  const requestBody = {
+    email: payload.email,
+    amount: String(payload.amountKobo),
+    currency: PAYSTACK_CURRENCY,
+    plan: payload.planCode,
+    reference: payload.reference,
+    callback_url: payload.callbackUrl,
+    metadata: {
+      user_id: payload.userId,
+      billing_interval: payload.interval,
+    },
+  };
+  const remaining = [...(acceptedCheckoutChannels ?? PAYSTACK_CHECKOUT_CHANNELS)];
+
+  while (remaining.length > 0) {
+    try {
+      const initialized = await paystackRequest<PaystackInitializeData>(
+        "/transaction/initialize",
+        {
+          method: "POST",
+          body: JSON.stringify({ ...requestBody, channels: remaining }),
+        }
+      );
+      acceptedCheckoutChannels = [...remaining];
+      return initialized;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      const blocked = [...remaining]
+        .sort((left, right) => right.length - left.length)
+        .find((channel) => paystackErrorNamesChannel(message, channel));
+      if (!blocked) throw error;
+      remaining.splice(remaining.indexOf(blocked), 1);
+      acceptedCheckoutChannels = null;
+    }
+  }
+
+  throw new Error("Paystack has no payment channels enabled for this account");
+}
+
+function paystackErrorNamesChannel(message: string, channel: string) {
+  const text = message.toLowerCase();
+  return text.includes(channel) || text.includes(channel.replaceAll("_", " "));
 }
 
 export async function verifyPaystackTransaction(reference: string) {
