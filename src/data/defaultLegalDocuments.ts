@@ -14,9 +14,9 @@ export type LegalSlug = "terms" | "privacy";
 
 export const DEFAULT_TERMS: LegalDocumentContent = {
   title: "Terms & Conditions",
-  lastUpdated: "July 14, 2026",
+  lastUpdated: "October 13, 2026",
   intro:
-    'These Terms & Conditions ("Terms") govern your access to and use of the Question Bank mobile application and related services (the "Service") operated by Question Bank ("we", "us", or "our"). By creating an account or using the Service, you agree to these Terms.',
+    'These Terms & Conditions ("Terms") govern your access to and use of Question Bank on the website and in the mobile app (the "Service"), operated by Question Bank ("we", "us", or "our"). By creating an account or using the Service, you agree to these Terms.',
   sections: [
     {
       title: "1. About the Service",
@@ -28,6 +28,7 @@ export const DEFAULT_TERMS: LegalDocumentContent = {
     {
       title: "2. Eligibility & Account Registration",
       body: [
+        "You must be at least 13 years old to create an account.",
         "You must provide accurate information when registering, including your name, email address, and phone number.",
         "You are responsible for maintaining the confidentiality of your login credentials and for all activity under your account.",
         "You must verify your email address using the one-time code we send before your account is fully activated.",
@@ -65,8 +66,8 @@ export const DEFAULT_TERMS: LegalDocumentContent = {
       title: "6. Subscriptions & Payments",
       body: [
         "Some features are available on a free tier with usage limits. Paid plans (such as Pro) may offer higher limits and additional features.",
-        "If you subscribe to a paid plan, payments are processed by our payment partner (Paystack). By subscribing, you also agree to applicable payment provider terms.",
-        "Subscription fees, billing intervals, and included features are shown in the app before checkout.",
+        "Paid plans are billed on the Question Bank website through Paystack. The mobile app does not collect card payments. By paying on the website, you also agree to Paystack's terms.",
+        "Subscription fees, billing intervals, and included features are shown on the website before you pay.",
         "You may cancel a subscription through the app where cancellation is supported. Cancellation typically stops future renewals; access may continue until the end of the current billing period unless stated otherwise.",
         "Except where required by law, fees already paid are non-refundable.",
       ],
@@ -89,7 +90,7 @@ export const DEFAULT_TERMS: LegalDocumentContent = {
       title: "9. Suspension & Termination",
       body: [
         "We may suspend or terminate your access if you breach these Terms, misuse the Service, or if required by law.",
-        "You may stop using the Service at any time. You may request account deletion by contacting us.",
+        "You may stop using the Service at any time. You can request permanent deletion in the app under Profile, or on the website Delete account page. We aim to complete that request within 30 days. You can also email oreoluwa.creatives@gmail.com.",
         "Sections that by nature should survive termination (including disclaimers, limitations of liability, and governing law) will continue to apply.",
       ],
     },
@@ -105,14 +106,14 @@ export const DEFAULT_TERMS: LegalDocumentContent = {
       title: "11. Changes to These Terms",
       body: [
         'We may update these Terms from time to time. When we do, we will update the "Last updated" date and may notify you through the app or by email.',
-        "Continued use of the Service after changes become effective constitutes acceptance of the revised Terms.",
+        "If a change is material, we will ask you to accept the updated Terms in the app or on the website before you continue.",
       ],
     },
     {
       title: "12. Governing Law & Contact",
       body: [
-        "These Terms are governed by the laws of the Federal Republic of Nigeria, without regard to conflict-of-law principles, unless mandatory local law requires otherwise.",
-        "If you have questions about these Terms, contact us at oreoluwa.creatives@gmail.com.",
+        "These Terms are governed by the laws of the Federal Republic of Nigeria, unless a mandatory local law requires otherwise.",
+        "Question Bank is operated by Oreoluwa Creatives. For legal notices, email oreoluwa.creatives@gmail.com.",
       ],
     },
   ],
@@ -120,9 +121,9 @@ export const DEFAULT_TERMS: LegalDocumentContent = {
 
 export const DEFAULT_PRIVACY: LegalDocumentContent = {
   title: "Privacy Policy",
-  lastUpdated: "July 14, 2026",
+  lastUpdated: "October 13, 2026",
   intro:
-    'This Privacy Policy explains how Question Bank ("we", "us", or "our") collects, uses, shares, and protects personal information when you use our mobile application and related services (the "Service").',
+    'This Privacy Policy explains how Question Bank ("we", "us", or "our"), operated by Oreoluwa Creatives, collects, uses, shares, and protects personal information when you use Question Bank on the website or in the mobile app (the "Service").',
   sections: [
     {
       title: "1. Information We Collect",
@@ -149,7 +150,7 @@ export const DEFAULT_PRIVACY: LegalDocumentContent = {
     {
       title: "3. AI Processing",
       body: [
-        "When you upload study materials, relevant text may be sent to AI services to extract or generate questions.",
+        "When you upload study materials, the text needed to generate questions is sent to our AI provider (Cursor's API). Do not upload passwords, government ID numbers, or other sensitive personal data that is unrelated to studying.",
         "We use these tools to deliver core functionality. You should avoid uploading sensitive personal data unrelated to your study materials.",
         "AI providers process data according to their own policies and our agreements with them.",
       ],
@@ -160,7 +161,7 @@ export const DEFAULT_PRIVACY: LegalDocumentContent = {
         "We share information with service providers that help us operate the Service, including hosting, authentication, payment processing, and AI processing partners.",
         "We may disclose information if required by law, court order, or to protect the rights, safety, and security of users and the Service.",
         "We do not sell your personal information.",
-        "Leaderboard or analytics features may show aggregated or non-sensitive performance data. Where identifiable information is shown, it is limited to what is necessary for the feature.",
+        "The leaderboard can show your first and last name, scores, and attempt counts to other signed-in users. You can turn this off in Profile. When it is off, your name is left off the leaderboard.",
       ],
     },
     {
@@ -180,17 +181,16 @@ export const DEFAULT_PRIVACY: LegalDocumentContent = {
     {
       title: "7. Your Choices & Rights",
       body: [
-        "You may update profile information in the app.",
-        "You may manage upload preferences and certain app settings locally on your device.",
-        "Depending on your location, you may have rights to access, correct, delete, or restrict processing of your personal information.",
-        "To exercise privacy rights or request account deletion, contact us at oreoluwa.creatives@gmail.com.",
+        "You can update your profile and turn leaderboard visibility off in the app or on the website.",
+        "You can request account deletion in the app under Profile, or on the website Delete account page. We aim to complete deletion within 30 days, including your profile photo.",
+        "Under Nigerian data-protection law, and where other local law applies, you may ask to access, correct, or delete personal information, or to object to certain processing. Email oreoluwa.creatives@gmail.com.",
       ],
     },
     {
       title: "8. Children's Privacy",
       body: [
-        "The Service is not directed to children under 13 (or the minimum age required in your jurisdiction) without parental consent.",
-        "If you believe a child has provided personal information without appropriate consent, contact us so we can take appropriate action.",
+        "You must be at least 13 years old. Sign-up and the terms screen ask you to confirm that.",
+        "We do not knowingly allow a child under 13 to create an account. If you believe that has happened, email oreoluwa.creatives@gmail.com and we will delete the account.",
       ],
     },
     {
@@ -204,13 +204,13 @@ export const DEFAULT_PRIVACY: LegalDocumentContent = {
       title: "10. Changes to This Policy",
       body: [
         'We may update this Privacy Policy from time to time. We will update the "Last updated" date and may provide additional notice for material changes.',
-        "Your continued use of the Service after an update means you accept the revised policy.",
+        "Material privacy changes use the same accept step as the Terms. We will update the \"Last updated\" date.",
       ],
     },
     {
       title: "11. Contact Us",
       body: [
-        "If you have questions about this Privacy Policy or our data practices, contact us at oreoluwa.creatives@gmail.com.",
+        "Question Bank is operated by Oreoluwa Creatives. Email oreoluwa.creatives@gmail.com with privacy questions or requests.",
       ],
     },
   ],

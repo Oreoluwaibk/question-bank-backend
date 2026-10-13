@@ -17,8 +17,9 @@ export const PAYSTACK_CURRENCY = process.env.PAYSTACK_CURRENCY ?? "NGN";
 function resolveAmountKobo(envValue: string | undefined, fallbackMajor: number) {
   const raw = Number(envValue ?? String(fallbackMajor));
   if (!Number.isFinite(raw) || raw <= 0) return fallbackMajor * 100;
-  // Treat small values as major units (5500 -> ₦5,500 = 550000 kobo).
-  if (raw < 10000) return Math.round(raw * 100);
+  // Values under 100,000 are naira (5500 = ₦5,500, 55000 = ₦55,000).
+  // Larger values are already kobo.
+  if (raw < 100000) return Math.round(raw * 100);
   return Math.round(raw);
 }
 

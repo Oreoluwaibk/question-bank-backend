@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "./supabaseAdmin";
+import { deleteUserAvatars } from "./avatarStorage";
 
 export const SUPPORT_EMAIL = "oreoluwa.creatives@gmail.com";
 
@@ -156,6 +157,12 @@ export async function deleteAccountPermanently(userId: string) {
     if (error && !/account_deletion_requests/i.test(error.message)) {
       throw new Error(error.message);
     }
+  }
+
+  try {
+    await deleteUserAvatars(userId);
+  } catch (avatarError) {
+    console.error("Avatar deletion failed:", avatarError);
   }
 
   const { error: deleteUserError } =

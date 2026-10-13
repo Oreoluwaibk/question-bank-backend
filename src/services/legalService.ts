@@ -116,6 +116,42 @@ function fallbackDocument(slug: LegalSlug): LegalDocument {
   };
 }
 
+const LEGAL_REVISION = "2026-10-13";
+
+function needsDefaultRefresh(row: LegalRow) {
+  return (
+    row.last_updated === "July 14, 2026" ||
+    row.intro.includes("mobile application and related services")
+  );
+}
+
+async function refreshStaleDocument(slug: LegalSlug) {
+  const defaults = DEFAULT_LEGAL_BY_SLUG[slug];
+  const updatedAt = new Date().toISOString();
+  const { data, error } = await supabaseAdmin
+    .from("legal_documents")
+    .upsert(
+      {
+        slug,
+        version: LEGAL_REVISION,
+        title: defaults.title,
+        last_updated: defaults.lastUpdated,
+        intro: defaults.intro,
+        sections: defaults.sections,
+        updated_at: updatedAt,
+      },
+      { onConflict: "slug" }
+    )
+    .select("*")
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return mapRow(data as LegalRow);
+}
+
 function isMissingLegalTableError(message: string) {
   return /legal_documents/i.test(message);
 }
@@ -148,7 +184,22 @@ export async function getPublishedLegalDocument(slug: LegalSlug) {
     }
   }
 
-  return mapRow(data as LegalRow);
+  const row = data as LegalRow;
+  if (needsDefaultRefresh(row)) {
+    try {
+      return await refreshStaleDocument(slug);
+    } catch (refreshError) {
+      if (
+        refreshError instanceof Error &&
+        isMissingLegalTableError(refreshError.message)
+      ) {
+        return fallbackDocument(slug);
+      }
+      throw refreshError;
+    }
+  }
+
+  return mapRow(row);
 }
 
 export async function getPublishedTermsVersion() {

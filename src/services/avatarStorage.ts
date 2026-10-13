@@ -66,3 +66,28 @@ export async function uploadAvatarBuffer(
 
   return `${urlData.publicUrl}?t=${Date.now()}`;
 }
+
+export async function deleteUserAvatars(userId: string) {
+  const { data, error } = await supabaseAdmin.storage
+    .from(AVATAR_BUCKET)
+    .list(userId);
+
+  if (error) {
+    if (/not found|bucket/i.test(error.message)) return;
+    throw new Error(error.message);
+  }
+
+  const paths = (data ?? [])
+    .filter((file) => file.name)
+    .map((file) => `${userId}/${file.name}`);
+
+  if (!paths.length) return;
+
+  const { error: removeError } = await supabaseAdmin.storage
+    .from(AVATAR_BUCKET)
+    .remove(paths);
+
+  if (removeError) {
+    throw new Error(removeError.message);
+  }
+}

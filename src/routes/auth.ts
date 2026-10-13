@@ -159,6 +159,12 @@ router.post('/signup', async (req, res) => {
     });
   }
 
+  if (req.body?.confirmedMinimumAge !== true) {
+    return res.status(400).json({
+      error: 'You must confirm that you are at least 13 years old',
+    });
+  }
+
   const validationError = validateRegistrationInput({
     email: normalizedEmail,
     password,
@@ -628,6 +634,12 @@ router.post('/signup', async (req, res) => {
   }
 
   try {
+    if (req.body?.confirmedMinimumAge !== true) {
+      return res.status(400).json({
+        error: 'Confirm that you are at least 13 years old',
+      });
+    }
+
     const { acceptedAt, termsVersion } = await recordTermsAcceptance(userId);
     res.json({
       message: 'Terms accepted',
@@ -654,12 +666,20 @@ router.post('/signup', async (req, res) => {
     const body = { ...(req.body as Record<string, unknown>) };
     delete body.terms_accepted_at;
     delete body.terms_accepted_version;
+    if ("show_on_leaderboard" in body) {
+      body.show_on_leaderboard = body.show_on_leaderboard === true;
+    }
 
     const profile = await updateUserProfile(userId, body);
     res.json(profile);
   } catch (err) {
+    const message = err instanceof Error ? err.message : 'Could not update profile';
+    const missingLeaderboard =
+      /show_on_leaderboard/i.test(message) && /column/i.test(message);
     return res.status(400).json({
-      error: err instanceof Error ? err.message : 'Could not update profile',
+      error: missingLeaderboard
+        ? 'The leaderboard setting is not available yet. Add the show_on_leaderboard column in Supabase, then try again.'
+        : message,
     });
   }
 });

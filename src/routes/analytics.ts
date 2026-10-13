@@ -2,7 +2,38 @@ import { Router } from "express";
 import { requireAuth } from "../middlewares/auth";
 import { supabaseAdmin } from "../services/supabaseAdmin";
 
+type LeaderboardProfile = {
+  id: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  show_on_leaderboard?: boolean | null;
+};
 
+async function loadLeaderboardProfiles(userIds: string[]) {
+  const withPrivacy = await supabaseAdmin
+    .from("profiles")
+    .select("id, first_name, last_name, show_on_leaderboard")
+    .in("id", userIds);
+
+  if (!withPrivacy.error) {
+    return (withPrivacy.data ?? []) as LeaderboardProfile[];
+  }
+
+  if (!/show_on_leaderboard/i.test(withPrivacy.error.message)) {
+    throw new Error(withPrivacy.error.message);
+  }
+
+  const fallback = await supabaseAdmin
+    .from("profiles")
+    .select("id, first_name, last_name")
+    .in("id", userIds);
+
+  if (fallback.error) {
+    throw new Error(fallback.error.message);
+  }
+
+  return (fallback.data ?? []) as LeaderboardProfile[];
+}
 
 const router = Router();
 router
@@ -205,10 +236,14 @@ router
     return res.json(emptyPage);
   }
 
-  const { data: profiles } = await supabaseAdmin
-    .from('profiles')
-    .select('id, first_name, last_name')
-    .in('id', userIds);
+  let profiles: LeaderboardProfile[];
+  try {
+    profiles = await loadLeaderboardProfiles(userIds);
+  } catch (err) {
+    return res.status(500).json({
+      error: err instanceof Error ? err.message : "Could not load leaderboard",
+    });
+  }
 
   const profileMap = new Map((profiles ?? []).map((p) => [p.id, p]));
 
@@ -216,13 +251,16 @@ router
     .map((userId) => {
       const userStats = stats.get(userId)!;
       const profile = profileMap.get(userId);
-      const name =
-        [profile?.first_name, profile?.last_name].filter(Boolean).join(' ') ||
-        'Anonymous';
+      const listed = profile?.show_on_leaderboard !== false;
+      const name = listed
+        ? [profile?.first_name, profile?.last_name].filter(Boolean).join(' ') ||
+          'Anonymous'
+        : '';
 
       return {
         userId,
         name,
+        listed,
         bestScore: userStats.bestScore,
         totalScore: userStats.totalScore,
         attempts: userStats.attempts,
@@ -236,7 +274,11 @@ router
       (a, b) =>
         b.bestScore - a.bestScore || b.averageAccuracy - a.averageAccuracy
     )
-    .map((entry, index) => ({ rank: index + 1, ...entry }));
+    .filter((entry) => entry.listed)
+    .map((entry, index) => {
+      const { listed, ...rest } = entry;
+      return { rank: index + 1, ...rest };
+    });
 
   const entries = ranked.slice(offset, offset + limit);
 
