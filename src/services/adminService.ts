@@ -9,6 +9,7 @@ import { listUserDevices } from "./deviceSessionService";
 import { isProTier } from "./subscriptionPlans";
 import { reactivateAccount, deactivateAccount } from "./accountService";
 import { countPendingDeletionRequests } from "./deletionRequestService";
+import { getPublishedTermsVersion } from "./legalService";
 
 type ProfileRow = {
   id: string;
@@ -19,7 +20,36 @@ type ProfileRow = {
   occupation?: string | null;
   created_at?: string | null;
   deactivated_at?: string | null;
+  avatar_url?: string | null;
+  show_on_leaderboard?: boolean | null;
+  terms_accepted_at?: string | null;
+  terms_accepted_version?: string | null;
 };
+
+const PROFILE_COLUMNS = [
+  "id",
+  "first_name",
+  "last_name",
+  "phone_number",
+  "field_of_study",
+  "occupation",
+  "created_at",
+  "deactivated_at",
+  "avatar_url",
+  "show_on_leaderboard",
+  "terms_accepted_at",
+  "terms_accepted_version",
+].join(", ");
+
+const PROFILE_COLUMNS_BASE =
+  "id, first_name, last_name, phone_number, field_of_study, occupation, created_at, deactivated_at";
+
+function isMissingProfileColumn(message: string) {
+  return (
+    /column/i.test(message) &&
+    /show_on_leaderboard|avatar_url|terms_accepted/i.test(message)
+  );
+}
 
 async function getAuthUser(userId: string) {
   const { data, error } = await supabaseAdmin.auth.admin.getUserById(userId);
@@ -37,9 +67,15 @@ function displayName(profile?: ProfileRow | null) {
   return name || "Unnamed user";
 }
 
-async function enrichUserSummary(profile: ProfileRow, authUser?: User | null) {
+async function enrichUserSummary(
+  profile: ProfileRow,
+  authUser?: User | null,
+  currentTermsVersion?: string | null
+) {
   const user = authUser ?? (await getAuthUser(profile.id));
   const subscription = await getSubscriptionStatus(profile.id);
+  const termsAcceptedAt = profile.terms_accepted_at ?? null;
+  const termsAcceptedVersion = profile.terms_accepted_version ?? null;
 
   return {
     id: profile.id,
@@ -48,6 +84,14 @@ async function enrichUserSummary(profile: ProfileRow, authUser?: User | null) {
     phoneNumber: profile.phone_number ?? null,
     fieldOfStudy: profile.field_of_study ?? null,
     occupation: profile.occupation ?? null,
+    avatarUrl: profile.avatar_url ?? null,
+    showOnLeaderboard: profile.show_on_leaderboard !== false,
+    termsAcceptedAt,
+    termsAcceptedVersion,
+    needsTermsAcceptance: Boolean(
+      currentTermsVersion &&
+        (!termsAcceptedAt || termsAcceptedVersion !== currentTermsVersion)
+    ),
     createdAt: user.created_at ?? profile.created_at ?? null,
     deactivatedAt: profile.deactivated_at ?? null,
     isActive: !profile.deactivated_at,
@@ -56,6 +100,14 @@ async function enrichUserSummary(profile: ProfileRow, authUser?: User | null) {
     billingStatus: subscription.billingStatus,
     usage: subscription.usage,
   };
+}
+
+async function currentTermsVersion() {
+  try {
+    return await getPublishedTermsVersion();
+  } catch {
+    return null;
+  }
 }
 
 export async function getPlatformStats() {
@@ -141,6 +193,7 @@ async function findAuthUserByEmail(email: string) {
 export async function searchUsers(query: string, page = 1, limit = 20) {
   const normalizedQuery = query.trim();
   const offset = (page - 1) * limit;
+  const termsVersion = await currentTermsVersion();
 
   if (normalizedQuery.includes("@")) {
     const authUser = await findAuthUserByEmail(normalizedQuery);
@@ -149,44 +202,26 @@ export async function searchUsers(query: string, page = 1, limit = 20) {
       return { users: [], total: 0, page, limit };
     }
 
-    const { data: profile } = await supabaseAdmin
-      .from("profiles")
-      .select(
-        "id, first_name, last_name, phone_number, field_of_study, occupation, created_at, deactivated_at"
-      )
-      .eq("id", authUser.id)
-      .maybeSingle();
-
+    const profileResult = await loadProfileById(authUser.id);
     const user = await enrichUserSummary(
-      profile ?? { id: authUser.id },
-      authUser
+      profileResult ?? { id: authUser.id },
+      authUser,
+      termsVersion
     );
 
     return { users: [user], total: 1, page, limit };
   }
 
-  let profileQuery = supabaseAdmin
-    .from("profiles")
-    .select(
-      "id, first_name, last_name, phone_number, field_of_study, occupation, created_at, deactivated_at",
-      { count: "exact" }
-    )
-    .order("created_at", { ascending: false })
-    .range(offset, offset + limit - 1);
-
-  if (normalizedQuery) {
-    profileQuery = profileQuery.or(
-      `first_name.ilike.%${normalizedQuery}%,last_name.ilike.%${normalizedQuery}%,phone_number.ilike.%${normalizedQuery}%`
-    );
-  }
-
-  const { data: profiles, count, error } = await profileQuery;
+  const { data: profiles, count, error } = await listProfiles(offset, limit, normalizedQuery);
   if (error) {
     throw new Error(error.message);
   }
 
+  const rows = (profiles ?? []) as unknown as ProfileRow[];
   const users = await Promise.all(
-    (profiles ?? []).map((profile) => enrichUserSummary(profile as ProfileRow))
+    rows.map((profile) =>
+      enrichUserSummary(profile, undefined, termsVersion)
+    )
   );
 
   return {
@@ -197,30 +232,68 @@ export async function searchUsers(query: string, page = 1, limit = 20) {
   };
 }
 
-export async function getUserDetail(userId: string) {
-  const [authUser, profileResult, subscription, devices] = await Promise.all([
-    getAuthUser(userId),
-    supabaseAdmin
+async function loadProfileById(userId: string) {
+  const full = await supabaseAdmin
+    .from("profiles")
+    .select(PROFILE_COLUMNS)
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (!full.error) return full.data as ProfileRow | null;
+  if (!isMissingProfileColumn(full.error.message)) {
+    throw new Error(full.error.message);
+  }
+
+  const base = await supabaseAdmin
+    .from("profiles")
+    .select(PROFILE_COLUMNS_BASE)
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (base.error) throw new Error(base.error.message);
+  return base.data as ProfileRow | null;
+}
+
+async function listProfiles(offset: number, limit: number, query: string) {
+  const run = (columns: string) => {
+    let profileQuery = supabaseAdmin
       .from("profiles")
-      .select(
-        "id, first_name, last_name, phone_number, field_of_study, occupation, created_at, deactivated_at"
-      )
-      .eq("id", userId)
-      .maybeSingle(),
+      .select(columns, { count: "exact" })
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (query) {
+      profileQuery = profileQuery.or(
+        `first_name.ilike.%${query}%,last_name.ilike.%${query}%,phone_number.ilike.%${query}%`
+      );
+    }
+
+    return profileQuery;
+  };
+
+  const full = await run(PROFILE_COLUMNS);
+  if (!full.error) return full;
+  if (!isMissingProfileColumn(full.error.message)) return full;
+  return run(PROFILE_COLUMNS_BASE);
+}
+
+export async function getUserDetail(userId: string) {
+  const [authUser, profile, subscription, devices, termsVersion] = await Promise.all([
+    getAuthUser(userId),
+    loadProfileById(userId),
     getSubscriptionStatus(userId),
     listUserDevices(userId),
+    currentTermsVersion(),
   ]);
+  const summary = await enrichUserSummary(
+    profile ?? { id: userId },
+    authUser,
+    termsVersion
+  );
 
   return {
-    id: userId,
-    email: authUser.email ?? null,
-    name: displayName(profileResult.data as ProfileRow | null),
-    phoneNumber: profileResult.data?.phone_number ?? null,
-    fieldOfStudy: profileResult.data?.field_of_study ?? null,
-    occupation: profileResult.data?.occupation ?? null,
-    createdAt: authUser.created_at ?? profileResult.data?.created_at ?? null,
-    deactivatedAt: profileResult.data?.deactivated_at ?? null,
-    isActive: !profileResult.data?.deactivated_at,
+    ...summary,
+    currentTermsVersion: termsVersion,
     lastSignInAt: authUser.last_sign_in_at ?? null,
     subscription,
     devices,
@@ -297,18 +370,25 @@ type MaterialRow = {
 async function getProfileMap(userIds: string[]) {
   if (!userIds.length) return new Map<string, ProfileRow>();
 
-  const { data, error } = await supabaseAdmin
+  const full = await supabaseAdmin
     .from("profiles")
-    .select(
-      "id, first_name, last_name, phone_number, field_of_study, occupation, created_at"
-    )
+    .select(PROFILE_COLUMNS)
     .in("id", userIds);
 
-  if (error) {
-    throw new Error(error.message);
+  const result =
+    full.error && isMissingProfileColumn(full.error.message)
+      ? await supabaseAdmin
+          .from("profiles")
+          .select(PROFILE_COLUMNS_BASE)
+          .in("id", userIds)
+      : full;
+
+  if (result.error) {
+    throw new Error(result.error.message);
   }
 
-  return new Map((data ?? []).map((profile) => [profile.id, profile as ProfileRow]));
+  const rows = (result.data ?? []) as unknown as ProfileRow[];
+  return new Map(rows.map((profile) => [profile.id, profile]));
 }
 
 async function getEmailMap(userIds: string[]) {
@@ -609,6 +689,7 @@ export async function getAdminLeaderboard(limit = 50) {
         userId,
         name: displayName(profile),
         email: emailMap.get(userId) ?? null,
+        showOnLeaderboard: profile?.show_on_leaderboard !== false,
         bestScore: userStats.bestScore,
         totalScore: userStats.totalScore,
         attempts: userStats.attempts,
